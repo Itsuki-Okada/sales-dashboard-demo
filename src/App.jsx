@@ -621,16 +621,32 @@ function parseUnyoCsv(text) {
         }
         if (!company || company === "／" || company === "/") continue;
         const monthLabel = cell(r, 0);
-        const m = monthLabel.match(/(\d{4})\s*[年\/\-.]\s*(\d{1,2})/);
-        const startMonth = m ? `${m[1]}-${String(m[2]).padStart(2, "0")}` : thisMonth;
-        const cleanPlan = plan === "／" || plan === "/" ? "" : plan;
-        items.push({ category, clientName: company, plan: cleanPlan, amount: parseFlexibleNumber(amountRaw), startMonth });
+        const toYm = (v) => {
+          const mm = String(v || "").match(/(\d{4})\s*[年\/\-.]\s*(\d{1,2})/);
+          return mm ? `${mm[1]}-${String(mm[2]).padStart(2, "0")}` : null;
+        };
+        const ym = toYm(monthLabel);
+        // 各ブロックの「日付」列（金額の右隣）＝開始月。空欄ならA列の月を使う
+        const dateCell = cell(r, col + 3);
+        const dateYm = /解除|解約/.test(dateCell) ? null : toYm(dateCell);
+        // 「契約解除」「解約」が会社名・プラン・金額・A列などに書かれていれば契約解除として扱う
+        const CANCEL_RE = /契約解除|解約|解除/;
+        const cancelCells = [monthLabel, company, plan, amountRaw, cell(r, col + 3)];
+        const cancelled = cancelCells.some((v) => CANCEL_RE.test(v));
+        // A列に「2026年11月 解除」のように月があればその月から、なければ今月から解除
+        const cancelMonth = cancelled ? (CANCEL_RE.test(monthLabel) && ym ? ym : thisMonth) : null;
+        const aColStart = ym && !(cancelled && CANCEL_RE.test(monthLabel)) ? ym : null;
+        const startMonth = dateYm || aColStart || thisMonth;
+        const startFromCsv = !!(dateYm || aColStart);
+        const strip = (v) => String(v).replace(/[（(【\[]?\s*(契約解除|解約|解除)(済み?)?\s*[）)】\]]?/g, "").trim();
+        const cleanPlan = plan === "／" || plan === "/" ? "" : strip(plan);
+        items.push({ category, clientName: strip(company) || company, plan: cleanPlan, amount: parseFlexibleNumber(amountRaw), startMonth, startFromCsv, cancelled, cancelMonth });
       }
     });
   }
 
   const sums = {};
-  UNYO_BLOCKS.forEach((c) => (sums[c] = items.filter((x) => x.category === c).reduce((a, x) => a + x.amount, 0)));
+  UNYO_BLOCKS.forEach((c) => (sums[c] = items.filter((x) => x.category === c && !x.cancelled).reduce((a, x) => a + x.amount, 0)));
   return { fixed, items, csvTotals, sums, warnings };
 }
 
@@ -644,7 +660,8 @@ function unyoToStocks(parsed) {
     plan: "",
     category: f.category,
     monthlyAmount: Math.round(f.amount),
-    startMonth: thisMonth,
+    startMonth: fiscalStart(thisMonth), // ドメイン・サーバー／保守管理は期首（8月）から発生
+    startFromCsv: true,
     endMonth: null,
     assignee: "",
     memo: "運用売上CSVの月間平均",
@@ -658,10 +675,13 @@ function unyoToStocks(parsed) {
     category: x.category,
     monthlyAmount: x.amount,
     startMonth: x.startMonth,
+    startFromCsv: x.startFromCsv,
     endMonth: null,
     assignee: "",
-    memo: x.amount ? "運用売上CSVから読み込み" : "運用予定（運用売上CSV）",
-    planned: !x.amount,
+    memo: x.cancelled ? `契約解除（${monthLabel(x.cancelMonth)}〜）` : x.amount ? "運用売上CSVから読み込み" : "運用予定（運用売上CSV）",
+    planned: !x.amount && !x.cancelled,
+    cancelled: !!x.cancelled,
+    endMonth: x.cancelled ? addMonths(x.cancelMonth, -1) : null,
     importedFrom: "unyo-csv",
   }));
   return [...fixedStocks, ...itemStocks];
@@ -672,7 +692,8 @@ function unyoToStocks(parsed) {
 const normName = (v) => String(v || "").replace(/\s|　/g, "").toLowerCase();
 function diffUnyoStocks(existing, incoming) {
   const thisMonth = currentMonthKey();
-  const live = existing.filter((st) => !st.endMonth || st.endMonth >= thisMonth);
+  // 契約解除済みのものも照合対象にする（再読み込みで二重登録しないため）
+  const live = existing.filter((st) => st.cancelled || !st.endMonth || st.endMonth >= thisMonth);
   const used = new Set();
   const added = [];
   const changed = [];
@@ -687,8 +708,10 @@ function diffUnyoStocks(existing, incoming) {
     used.add(old.id);
     const sameAmount = Number(old.monthlyAmount) === Number(next.monthlyAmount);
     const samePlan = (old.plan || "") === (next.plan || "");
-    const sameStart = old.startMonth <= thisMonth || old.startMonth === next.startMonth;
-    if (sameAmount && samePlan && sameStart) unchanged.push({ old, next });
+    // CSVに開始月があるときはその月と比べる（ないときは開始月の違いを無視）
+    const sameStart = next.startFromCsv ? old.startMonth === next.startMonth : old.startMonth <= thisMonth || old.startMonth === next.startMonth;
+    const sameCancel = !!old.cancelled === !!next.cancelled && (!next.cancelled || old.endMonth === next.endMonth);
+    if (sameAmount && samePlan && sameStart && sameCancel) unchanged.push({ old, next });
     else changed.push({ old, next });
   }
   return { added, changed, unchanged };
@@ -701,8 +724,18 @@ function applyUnyoDiff(stocks, diff) {
   const prevMonth = addMonths(thisMonth, -1);
   let out = [...stocks];
   for (const { old, next } of diff.changed) {
-    const planned = !next.monthlyAmount;
-    if (old.startMonth >= thisMonth) {
+    const planned = !next.monthlyAmount && !next.cancelled;
+    // 契約解除・解除の取り消しは、その契約自体を書き換える
+    if (next.cancelled || old.cancelled) {
+      out = out.map((st) =>
+        st.id === old.id
+          ? { ...st, cancelled: !!next.cancelled, endMonth: next.cancelled ? next.endMonth : null, planned, memo: next.memo, monthlyAmount: next.cancelled ? st.monthlyAmount : next.monthlyAmount, plan: next.plan || st.plan }
+          : st
+      );
+      continue;
+    }
+    const onlyStart = Number(old.monthlyAmount) === Number(next.monthlyAmount) && (old.plan || "") === (next.plan || "");
+    if (onlyStart || old.startMonth >= thisMonth) {
       out = out.map((st) =>
         st.id === old.id
           ? { ...st, monthlyAmount: next.monthlyAmount, plan: next.plan, name: st.importedFrom ? next.name : st.name, startMonth: next.startMonth, planned, memo: next.memo }
@@ -3237,14 +3270,15 @@ function CompanyListPage({ projects, onOpenDetail, visits, onAddVisit, stocks = 
 function DashboardHero({ month, projects, stocks, target, onEditTarget, onChangeMonth, monthChoices, baseOf = () => 0, refs = [] }) {
   const list = projects.filter((p) => p.scheduledMonth === month);
   const c = computeCounts(list);
-  // 確定金額 = 受注・納品済みの合計 + 制作基礎数字
-  const confirmed = c.confirmedTotal + baseOf(month);
+  // 確定金額 = 受注・納品済みの合計 + 制作基礎数字 + ストック売上
+  const stockOfMonth = (m) => stocks.filter((st) => stockActiveIn(st, m)).reduce((a, st) => a + (Number(st.monthlyAmount) || 0), 0);
+  const confirmed = c.confirmedTotal + baseOf(month) + stockOfMonth(month);
   const open = list.filter((p) => p.status === "active");
   const sumOf = (arr) => arr.reduce((a, p) => a + (Number(p.estimatedAmount) || 0), 0);
   const hot = sumOf(open.filter((p) => p.confidence === 3));
   const warm = sumOf(open.filter((p) => p.confidence === 2));
   const cool = sumOf(open.filter((p) => p.confidence === 1)) + sumOf(refs.filter((p) => p.scheduledMonth === month && p.status === "active")); // 参考見積りもCOOLに含める
-  const stock = stocks.filter((st) => stockActiveIn(st, month)).reduce((a, st) => a + st.monthlyAmount, 0);
+  const stock = stockOfMonth(month);
   const postponed = projects.reduce((acc, p) => acc + p.history.filter((h) => h.type === "postponed" && h.fromMonth === month).length, 0);
   const isNow = month === currentMonthKey();
   const pct = target > 0 ? Math.round((confirmed / target) * 100) : 0;
@@ -3283,7 +3317,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
 
   // 直近6か月の確定金額（ミニ推移）
   const trendMonths = Array.from({ length: 6 }, (_, i) => addMonths(month, i - 5));
-  const trend = trendMonths.map((m) => ({ m, v: computeCounts(projects.filter((p) => p.scheduledMonth === m)).confirmedTotal + baseOf(m) }));
+  const trend = trendMonths.map((m) => ({ m, v: computeCounts(projects.filter((p) => p.scheduledMonth === m)).confirmedTotal + baseOf(m) + stockOfMonth(m) }));
   const trendMax = Math.max(target, ...trend.map((t) => t.v), 1);
   const forecast = confirmed + hot + warm + cool;
   const barBase = Math.max(target, forecast, 1);
@@ -3691,7 +3725,7 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
     const stockTotal = stockList.reduce((a, st) => a + (st.monthlyAmount || 0), 0);
     const baseAmt = baseOf(m);
     const refList = refs.filter((p) => p.scheduledMonth === m && p.status === "active");
-    const confirmedAll = c.confirmedTotal + baseAmt;
+    const confirmedAll = c.confirmedTotal + baseAmt + stockTotal; // ストック売上も確定金額に含める
     const forecast = confirmedAll + sum(open) + sum(refList);
     return {
       month: m,
@@ -4359,7 +4393,7 @@ function UnyoImportModal({ open, onClose, onImport, existingCount, stocks = [] }
         ...parsed.fixed.map((f) => ({ category: f.category, count: "月間平均", amount: f.amount, check: null })),
         ...UNYO_BLOCKS.map((c) => ({
           category: c,
-          count: (() => { const l = parsed.items.filter((x) => x.category === c); const pl = l.filter((x) => !x.amount).length; return `${l.length - pl}社${pl ? `＋運用予定${pl}` : ""}`; })(),
+          count: (() => { const all = parsed.items.filter((x) => x.category === c); const cx = all.filter((x) => x.cancelled).length; const l = all.filter((x) => !x.cancelled); const pl = l.filter((x) => !x.amount).length; return `${l.length - pl}社${pl ? `＋運用予定${pl}` : ""}${cx ? `・契約解除${cx}` : ""}`; })(),
           amount: parsed.sums[c] || 0,
           check: parsed.csvTotals[c] !== undefined ? parsed.csvTotals[c] === parsed.sums[c] : null,
           csvTotal: parsed.csvTotals[c],
@@ -4375,7 +4409,7 @@ function UnyoImportModal({ open, onClose, onImport, existingCount, stocks = [] }
   return (
     <Modal open={open} onClose={close} title="運用売上CSVを読み込む" width="max-w-xl">
       <p className="text-sm leading-relaxed text-slate-500">
-        ドメイン・サーバーと保守管理は「月間平均」の金額を毎月のストックとして、SNS運用・WEB広告運用・AI運用・AIO運用は会社ごとに会社名・プラン・金額を読み込みます。
+        ドメイン・サーバーと保守管理は「月間平均」の金額を期首（8月）からの毎月のストックとして、SNS運用・WEB広告運用・AI運用・AIO運用は会社ごとに会社名・プラン・金額・日付（開始月）を読み込みます。
       </p>
       <input
         type="file"
@@ -4407,9 +4441,9 @@ function UnyoImportModal({ open, onClose, onImport, existingCount, stocks = [] }
               <span className="tabular-nums">{formatYen(total)}</span>
             </div>
           </div>
-          {parsed.items.some((x) => !x.amount) && (
+          {parsed.items.some((x) => !x.amount && !x.cancelled) && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">
-              会社名はあるが金額が空欄の会社は「運用予定」として金額0で読み込み、一覧の一番下に表示します（{parsed.items.filter((x) => !x.amount).map((x) => x.clientName).join("、")}）。A列に「2027年4月」などの記載がある行は、その月から開始します。
+              会社名はあるが金額が空欄の会社は「運用予定」として金額0で読み込み、一覧の一番下に表示します（{parsed.items.filter((x) => !x.amount && !x.cancelled).map((x) => x.clientName).join("、")}）。開始月は各ブロックの「日付」列を使い、空欄のときはA列の月を使います。
             </div>
           )}
           {parsed.warnings.length > 0 && (
@@ -4481,7 +4515,10 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete, on
   const [showUnyo, setShowUnyo] = useState(false);
   const [catFilter, setCatFilter] = useState("all");
   const thisMonth = currentMonthKey();
-  const isPlanned = (st) => !!st.planned || Number(st.monthlyAmount) === 0;
+  const isEnded = (st) => !!st.cancelled || (!!st.endMonth && st.endMonth < thisMonth);
+  const isPlanned = (st) => !isEnded(st) && (!!st.planned || Number(st.monthlyAmount) === 0);
+  // 並び：継続中・開始前 → 運用予定 → 契約解除・終了
+  const groupOf = (st) => (isEnded(st) ? 2 : isPlanned(st) ? 1 : 0);
   const activeNow = stocks.filter((st) => stockActiveIn(st, thisMonth) && !isPlanned(st));
   const mrr = activeNow.reduce((a, st) => a + st.monthlyAmount, 0);
   const byCat = STOCK_CATEGORIES.map((c) => {
@@ -4491,9 +4528,10 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete, on
   const catColors = STOCK_COLORS;
   const shown = stocks
     .filter((st) => catFilter === "all" || st.category === catFilter)
-    .sort((a, b) => Number(isPlanned(a)) - Number(isPlanned(b)) || Number(stockActiveIn(b, thisMonth)) - Number(stockActiveIn(a, thisMonth)) || b.monthlyAmount - a.monthlyAmount);
+    .sort((a, b) => groupOf(a) - groupOf(b) || Number(stockActiveIn(b, thisMonth)) - Number(stockActiveIn(a, thisMonth)) || b.monthlyAmount - a.monthlyAmount);
 
   function statusOf(st) {
+    if (st.cancelled) return { label: "契約解除", cls: "bg-rose-50 text-rose-600" };
     if (isPlanned(st)) return { label: "運用予定", cls: "bg-amber-50 text-amber-700" };
     if (st.startMonth > thisMonth) return { label: "開始前", cls: "bg-sky-50 text-sky-700" };
     if (st.endMonth && st.endMonth < thisMonth) return { label: "終了", cls: "bg-slate-100 text-slate-500" };
@@ -4562,7 +4600,9 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete, on
         {shown.map((st, idx) => {
           const sts = statusOf(st);
           const planned = isPlanned(st);
+          const ended = isEnded(st);
           const firstPlanned = planned && (idx === 0 || !isPlanned(shown[idx - 1]));
+          const firstEnded = ended && (idx === 0 || !isEnded(shown[idx - 1]));
           return (
             <React.Fragment key={st.id}>
             {firstPlanned && (
@@ -4571,7 +4611,13 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete, on
                 <span className="h-px flex-1 bg-amber-200" />
               </div>
             )}
-            <div className={`flex items-center justify-between gap-3 rounded-xl border p-3.5 shadow-sm ${planned ? "border-dashed border-amber-200 bg-amber-50/30" : "border-slate-200 bg-white"}`}>
+            {firstEnded && (
+              <div className="mt-3 flex items-center gap-2 px-1 text-xs font-medium text-rose-600">
+                契約解除・終了（{shown.filter(isEnded).length}件・ストック売上には含めません）
+                <span className="h-px flex-1 bg-rose-200" />
+              </div>
+            )}
+            <div className={`flex items-center justify-between gap-3 rounded-xl border p-3.5 shadow-sm ${ended ? "border-slate-200 bg-slate-50 opacity-70" : planned ? "border-dashed border-amber-200 bg-amber-50/30" : "border-slate-200 bg-white"}`}>
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="truncate text-sm font-semibold text-slate-900">{st.clientName}</span>
@@ -4590,7 +4636,7 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete, on
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <div className={`pr-2 text-right text-sm font-semibold tabular-nums ${planned ? "text-slate-400" : "text-violet-700"}`}>{formatYen(st.monthlyAmount)}<span className="text-[10px] font-normal text-slate-400">/月</span></div>
+                <div className={`pr-2 text-right text-sm font-semibold tabular-nums ${ended ? "text-slate-400 line-through" : planned ? "text-slate-400" : "text-violet-700"}`}>{formatYen(st.monthlyAmount)}<span className="text-[10px] font-normal text-slate-400">/月</span></div>
                 <button onClick={() => setEditing(st)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100"><Pencil size={15} /></button>
                 <button onClick={() => onDelete(st)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-rose-500"><Trash2 size={15} /></button>
               </div>
