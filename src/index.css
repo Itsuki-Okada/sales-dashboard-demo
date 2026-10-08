@@ -8,6 +8,187 @@ html, body, #root {
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
+  font-family: "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN",
+    "Hiragino Sans", Meiryo, sans-serif;
 }
+
+/* ------------------------------------------------------------------ */
+/* テーマ共通の変数（ライトモード）                                  */
+/* ------------------------------------------------------------------ */
+:root {
+  --font-num: Outfit, ui-sans-serif, system-ui, sans-serif;
+  --c-card: #ffffff;
+  --c-track: #f1f5f9;
+  --c-lost-track: #ffe4e6;
+  --c-ink: #0f172a;
+  --c-muted: #64748b;
+  --c-border-soft: #edf0f4;
+  --c-hero: #0f172a;
+  --c-now-a: #818cf8;
+  --c-now-b: #c4b5fd;
+}
+
+/* ================================================================== */
+/* ネイビーモード：濃紺のサイドバー × ティールのアクセント                  */
+/* ================================================================== */
+[data-theme="b"] {
+  --c-hero: #0f1b2d;
+  --c-now-a: #2dd4bf;
+  --c-now-b: #0ea5e9;
+  --c-border-soft: #e3e9f0;
+}
+[data-theme="b"] .app-root { background-color: #eef2f6; }
+[data-theme="b"] .app-header { background-color: rgba(255,255,255,.85); backdrop-filter: blur(8px); }
+
+/* サイドバー */
+[data-theme="b"] .app-sidebar { background-color: #0f1b2d; border-color: #0f1b2d; }
+[data-theme="b"] .app-sidebar .text-slate-900 { color: #ffffff; }
+[data-theme="b"] .app-sidebar .text-slate-400 { color: #7f91aa; }
+[data-theme="b"] .app-sidebar .text-slate-500 { color: #a9b8cc; }
+[data-theme="b"] .app-sidebar .app-nav:hover { background-color: rgba(255,255,255,.06); }
+[data-theme="b"] .app-sidebar .app-nav.is-active { background-color: rgba(45,212,191,.14); color: #5eead4; }
+[data-theme="b"] .app-sidebar .app-logo { background: linear-gradient(135deg,#14b8a6,#0ea5e9); }
+[data-theme="b"] .app-sidebar .app-theme { border-color: #23344d; }
+[data-theme="b"] .app-sidebar .app-theme .bg-slate-900 { background-color: #14b8a6; color: #04201d; }
+[data-theme="b"] .app-sidebar .app-theme .hover\:bg-slate-100:hover { background-color: rgba(255,255,255,.08); }
+[data-theme="b"] .app-sidebar .border-slate-300 { border-color: #33465f; }
+[data-theme="b"] .app-sidebar .hover\:bg-slate-100:hover { background-color: rgba(255,255,255,.08); }
+
+/* アクセント：藍色 → ティール */
+[data-theme="b"] .bg-indigo-600 { background-color: #0f766e; }
+[data-theme="b"] .hover\:bg-indigo-700:hover { background-color: #115e59; }
+[data-theme="b"] .bg-indigo-50 { background-color: #effcf9; }
+[data-theme="b"] .bg-indigo-50\/60 { background-color: rgba(239,252,249,.6); }
+[data-theme="b"] .bg-indigo-100 { background-color: #ccfbf1; }
+[data-theme="b"] .hover\:bg-indigo-50:hover { background-color: #effcf9; }
+[data-theme="b"] .hover\:bg-indigo-100:hover { background-color: #ccfbf1; }
+[data-theme="b"] .text-indigo-500 { color: #14b8a6; }
+[data-theme="b"] .text-indigo-600 { color: #0f766e; }
+[data-theme="b"] .text-indigo-700 { color: #115e59; }
+[data-theme="b"] .hover\:text-indigo-600:hover { color: #0f766e; }
+[data-theme="b"] .border-indigo-100 { border-color: #ccfbf1; }
+[data-theme="b"] .border-indigo-200 { border-color: #99f6e4; }
+[data-theme="b"] .border-indigo-300, [data-theme="b"] .hover\:border-indigo-300:hover { border-color: #5eead4; }
+[data-theme="b"] .border-indigo-400, [data-theme="b"] .border-indigo-500 { border-color: #14b8a6; }
+[data-theme="b"] .focus\:border-indigo-300:focus, [data-theme="b"] .focus\:border-indigo-400:focus { border-color: #5eead4; }
+[data-theme="b"] .focus\:ring-indigo-100:focus { --tw-ring-color: #ccfbf1; }
+[data-theme="b"] .bg-slate-900 { background-color: #0f1b2d; }
+
+/* カード：枠線を弱め、やわらかい影で浮かせる */
+[data-theme="b"] .border-slate-200 { border-color: #e3e9f0; }
+[data-theme="b"] .shadow-sm { box-shadow: 0 1px 2px rgba(15,27,45,.04), 0 10px 26px -16px rgba(15,27,45,.22); }
+
+/* ================================================================== */
+/* ダークモード                                                          */
+/* ================================================================== */
+[data-theme="c"] {
+  color-scheme: dark;
+  --c-card: #141b26;
+  --c-track: #222c3b;
+  --c-lost-track: rgba(244,63,94,.28);
+  --c-ink: #f1f5f9;
+  --c-muted: #94a3b8;
+  --c-border-soft: #243042;
+  --c-hero: #2a3550;
+  --c-now-a: #818cf8;
+  --c-now-b: #e879f9;
+}
+[data-theme="c"] body, [data-theme="c"] .app-root { background-color: #0b1018; }
+[data-theme="c"] .bg-white, [data-theme="c"] .focus\:bg-white:focus, [data-theme="c"] .hover\:bg-white:hover { background-color: #141b26; }
+[data-theme="c"] .app-sidebar, [data-theme="c"] .app-header { background-color: #0f151f; }
+[data-theme="c"] .bg-slate-50, [data-theme="c"] .bg-slate-50\/50, [data-theme="c"] .bg-slate-50\/60 { background-color: #0f1520; }
+[data-theme="c"] .bg-slate-100 { background-color: #1c2534; }
+[data-theme="c"] .bg-slate-200 { background-color: #2a3546; }
+[data-theme="c"] .hover\:bg-slate-50:hover, [data-theme="c"] .hover\:bg-slate-50\/60:hover, [data-theme="c"] .active\:bg-slate-50:active { background-color: #1a2230; }
+[data-theme="c"] .hover\:bg-slate-100:hover { background-color: #222c3b; }
+[data-theme="c"] .bg-slate-900 { background-color: #e2e8f0; }
+[data-theme="c"] .bg-slate-900.text-white, [data-theme="c"] .bg-slate-900 .text-white { color: #0b1018; }
+[data-theme="c"] .bg-slate-900\/40 { background-color: rgba(0,0,0,.6); }
+
+[data-theme="c"] .border-slate-100, [data-theme="c"] .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #1e2836; }
+[data-theme="c"] .border-slate-200 { border-color: #263244; }
+[data-theme="c"] .border-slate-300 { border-color: #334156; }
+[data-theme="c"] .ring-white { --tw-ring-color: #141b26; }
+[data-theme="c"] .shadow-sm { box-shadow: 0 1px 2px rgba(0,0,0,.35); }
+
+[data-theme="c"] .text-slate-900 { color: #f1f5f9; }
+[data-theme="c"] .text-slate-800 { color: #e2e8f0; }
+[data-theme="c"] .text-slate-700 { color: #cbd5e1; }
+[data-theme="c"] .text-slate-600, [data-theme="c"] .hover\:text-slate-600:hover, [data-theme="c"] .hover\:text-slate-700:hover { color: #b4c0d0; }
+[data-theme="c"] .text-slate-500 { color: #94a3b8; }
+[data-theme="c"] .text-slate-400 { color: #7a889e; }
+[data-theme="c"] .text-slate-300 { color: #4a586d; }
+
+/* 色付きの薄い面 → 半透明の色面 */
+[data-theme="c"] .bg-indigo-50, [data-theme="c"] .hover\:bg-indigo-50:hover, [data-theme="c"] .bg-indigo-50\/60 { background-color: rgba(129,140,248,.14); }
+[data-theme="c"] .bg-indigo-100, [data-theme="c"] .hover\:bg-indigo-100:hover { background-color: rgba(129,140,248,.24); }
+[data-theme="c"] .bg-emerald-50 { background-color: rgba(16,185,129,.13); }
+[data-theme="c"] .bg-rose-50, [data-theme="c"] .hover\:bg-rose-50:hover { background-color: rgba(244,63,94,.13); }
+[data-theme="c"] .bg-rose-100 { background-color: rgba(244,63,94,.22); }
+[data-theme="c"] .bg-amber-50, [data-theme="c"] .bg-amber-50\/50, [data-theme="c"] .bg-amber-50\/60, [data-theme="c"] .hover\:bg-amber-50:hover { background-color: rgba(245,158,11,.11); }
+[data-theme="c"] .bg-amber-100, [data-theme="c"] .hover\:bg-amber-100:hover { background-color: rgba(245,158,11,.2); }
+[data-theme="c"] .bg-orange-100, [data-theme="c"] .hover\:bg-orange-50:hover { background-color: rgba(249,115,22,.18); }
+[data-theme="c"] .bg-sky-50, [data-theme="c"] .hover\:bg-sky-50:hover { background-color: rgba(14,165,233,.13); }
+[data-theme="c"] .bg-sky-100 { background-color: rgba(14,165,233,.22); }
+[data-theme="c"] .bg-violet-50 { background-color: rgba(139,92,246,.15); }
+[data-theme="c"] .border-amber-100, [data-theme="c"] .border-amber-200 { border-color: rgba(245,158,11,.32); }
+[data-theme="c"] .hover\:border-amber-300:hover { border-color: rgba(245,158,11,.55); }
+[data-theme="c"] .border-rose-200 { border-color: rgba(244,63,94,.35); }
+[data-theme="c"] .border-violet-100, [data-theme="c"] .border-violet-200 { border-color: rgba(139,92,246,.35); }
+[data-theme="c"] .border-indigo-100, [data-theme="c"] .border-indigo-200 { border-color: rgba(129,140,248,.35); }
+[data-theme="c"] .border-indigo-300, [data-theme="c"] .hover\:border-indigo-300:hover { border-color: rgba(129,140,248,.6); }
+
+/* 色付きの文字 → 暗い背景でも読める明るさに */
+[data-theme="c"] .text-indigo-500, [data-theme="c"] .text-indigo-600, [data-theme="c"] .text-indigo-700, [data-theme="c"] .hover\:text-indigo-600:hover { color: #a5b4fc; }
+[data-theme="c"] .text-emerald-600, [data-theme="c"] .text-emerald-700 { color: #34d399; }
+[data-theme="c"] .text-rose-500, [data-theme="c"] .text-rose-600, [data-theme="c"] .text-rose-700, [data-theme="c"] .hover\:text-rose-500:hover { color: #fb7185; }
+[data-theme="c"] .text-amber-600, [data-theme="c"] .text-amber-700, [data-theme="c"] .text-amber-800 { color: #fbbf24; }
+[data-theme="c"] .text-sky-600, [data-theme="c"] .text-sky-700 { color: #38bdf8; }
+[data-theme="c"] .text-violet-600, [data-theme="c"] .text-violet-700 { color: #c4b5fd; }
+[data-theme="c"] .text-orange-600, [data-theme="c"] .text-orange-700 { color: #fb923c; }
+
+/* サイドバーの選択中 */
+[data-theme="c"] .app-sidebar .app-nav.is-active { background-color: rgba(129,140,248,.16); color: #c7d2fe; }
+[data-theme="c"] .app-sidebar .app-logo { background: linear-gradient(135deg,#6366f1,#c026d3); }
+
+/* 入力欄 */
+[data-theme="c"] input, [data-theme="c"] select, [data-theme="c"] textarea { color: #e2e8f0; }
+[data-theme="c"] input::placeholder, [data-theme="c"] textarea::placeholder { color: #64748b; }
+[data-theme="c"] select option { background: #141b26; }
+
+/* グラフ（Recharts）のツールチップ */
+[data-theme="c"] .recharts-default-tooltip { background-color: #141b26 !important; border-color: #263244 !important; color: #e2e8f0; }
+
+/* ネイビーモード：ダッシュボードの「今月」カードを濃紺で主役に */
+[data-theme="b"] .app-hero { background: linear-gradient(160deg,#0f1b2d 0%,#16283f 100%); border-color: #0f1b2d; --c-track: #22354f; --c-ink: #ffffff; --c-muted: #9fb0c6; }
+[data-theme="b"] .app-hero .text-slate-900, [data-theme="b"] .app-hero .text-slate-800 { color: #ffffff; }
+[data-theme="b"] .app-hero .text-slate-700, [data-theme="b"] .app-hero .text-slate-600 { color: #d5deea; }
+[data-theme="b"] .app-hero .text-slate-500, [data-theme="b"] .app-hero .text-slate-400 { color: #9fb0c6; }
+[data-theme="b"] .app-hero .border-slate-200 { border-color: #2a3e5a; }
+[data-theme="b"] .app-hero .bg-white { background-color: transparent; }
+[data-theme="b"] .app-hero .hover\:bg-slate-50:hover { background-color: rgba(255,255,255,.06); }
+[data-theme="b"] .app-hero .bg-slate-900 { background-color: #2dd4bf; color: #04201d; }
+[data-theme="b"] .app-hero .text-emerald-700, [data-theme="b"] .app-hero .text-emerald-600 { color: #34d399; }
+[data-theme="b"] .app-hero .text-rose-600 { color: #fb7185; }
+[data-theme="b"] .app-hero .text-amber-600 { color: #fbbf24; }
+[data-theme="b"] .app-hero .text-indigo-600, [data-theme="b"] .app-hero .text-indigo-700 { color: #5eead4; }
+[data-theme="b"] .app-hero .bg-rose-50 { background-color: rgba(244,63,94,.16); }
+[data-theme="b"] .app-hero .bg-amber-50 { background-color: rgba(245,158,11,.15); }
+[data-theme="b"] .app-hero .bg-sky-50 { background-color: rgba(14,165,233,.16); }
+[data-theme="b"] .app-hero .bg-violet-50 { background-color: rgba(139,92,246,.2); }
+[data-theme="b"] .app-hero .text-sky-600 { color: #38bdf8; }
+[data-theme="b"] .app-hero .text-violet-600 { color: #c4b5fd; }
+[data-theme="b"] .app-hero .bg-indigo-600 { background-color: #14b8a6; }
+
+/* ダークモード：目的タグなど、色を直接指定しているタグを暗い背景向けに */
+[data-theme="c"] .app-tag {
+  background: color-mix(in srgb, var(--tag-fg) 26%, transparent) !important;
+  color: color-mix(in srgb, var(--tag-fg) 45%, #ffffff) !important;
+}
+
+/* サブメニュー（月別状況の全体／担当者） */
+[data-theme="b"] .app-sidebar .border-slate-200 { border-color: #23344d; }
+[data-theme="b"] .app-sidebar .app-subnav:hover { background-color: rgba(255,255,255,.06); }
+[data-theme="b"] .app-sidebar .app-subnav.is-active { background-color: rgba(255,255,255,.08); color: #ffffff; }
+[data-theme="b"] .app-sidebar .bg-slate-200 { background-color: #23344d; }
+[data-theme="b"] .app-sidebar .text-slate-600 { color: #cbd5e1; }

@@ -2,7 +2,11 @@
 export default {
   content: ["./index.html", "./src/**/*.{js,jsx}"],
   theme: {
-    extend: {},
+    extend: {
+      fontFamily: {
+        sans: ['"Noto Sans JP"', "-apple-system", "BlinkMacSystemFont", '"Hiragino Sans"', "Meiryo", "sans-serif"],
+      },
+    },
   },
   plugins: [],
 };
