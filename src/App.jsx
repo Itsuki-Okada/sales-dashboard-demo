@@ -1919,6 +1919,79 @@ function ProjectDetailInner({ project, onClose, onAction, onAddNote, onSetDelive
 /* 受注率分析ページ                                                     */
 /* ------------------------------------------------------------------ */
 
+// 受注率分析の絞り込み（ラベル列をそろえた3段のフィルター）
+function AnalysisFilters({ category, setCategory, confidence, setConfidence, assignee, setAssignee, assigneeList, resultCount }) {
+  const isFiltered = category !== "全体" || confidence !== "すべて" || assignee !== "全員";
+  const pill = (active) =>
+    `inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-xs font-medium transition-colors ${
+      active ? "bg-slate-900 text-white shadow-sm" : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
+    }`;
+  const confOptions = [
+    { value: "すべて", label: "すべて" },
+    { value: "3", label: "HOT", dot: "#e11d48" },
+    { value: "2", label: "WARM", dot: "#d97706" },
+    { value: "1", label: "COOL", dot: "#0284c7" },
+  ];
+  const rows = [
+    {
+      label: "カテゴリ",
+      node: ["全体", ...CATEGORIES].map((c) => (
+        <button key={c} onClick={() => setCategory(c)} className={pill(category === c)}>
+          {c}
+        </button>
+      )),
+    },
+    {
+      label: "肌感",
+      node: confOptions.map((o) => (
+        <button key={o.value} onClick={() => setConfidence(o.value)} className={`${pill(confidence === o.value)} tracking-wide`}>
+          {o.dot && <span className="inline-block h-2 w-2 rounded-full" style={{ background: o.dot }} />}
+          {o.label}
+        </button>
+      )),
+    },
+    {
+      label: "担当",
+      node: ["全員", ...assigneeList].map((a) => (
+        <button key={a} onClick={() => setAssignee(a)} className={`${pill(assignee === a)} ${a !== "全員" ? "pl-1.5" : ""}`}>
+          {a !== "全員" && <Avatar name={a} size={22} />}
+          {a}
+        </button>
+      )),
+    },
+  ];
+  return (
+    <div className="rounded-[22px] border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+          <Search size={15} className="text-slate-400" />
+          絞り込み
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">{resultCount}件が対象</span>
+        </div>
+        <button
+          onClick={() => {
+            setCategory("全体");
+            setConfidence("すべて");
+            setAssignee("全員");
+          }}
+          disabled={!isFiltered}
+          className="rounded-lg px-2.5 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-50 disabled:cursor-default disabled:text-slate-300 disabled:hover:bg-transparent"
+        >
+          条件をリセット
+        </button>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {rows.map((r) => (
+          <div key={r.label} className="flex flex-col gap-2 px-5 py-3 sm:flex-row sm:items-center sm:gap-4">
+            <div className="w-16 shrink-0 text-xs font-medium text-slate-500">{r.label}</div>
+            <div className="flex flex-wrap gap-1.5">{r.node}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AnalysisPage({ projects }) {
   const [category, setCategory] = useState("全体");
   const [confidence, setConfidence] = useState("すべて");
@@ -1952,16 +2025,16 @@ function AnalysisPage({ projects }) {
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <ChipGroup label="カテゴリ" options={["全体", ...CATEGORIES]} value={category} onChange={setCategory} />
-        <ChipGroup
-          label="肌感"
-          options={[{ value: "すべて", label: "すべて" }, { value: "3", label: "HOT" }, { value: "2", label: "WARM" }, { value: "1", label: "COOL" }]}
-          value={confidence}
-          onChange={setConfidence}
-        />
-        <ChipGroup label="担当" options={["全員", ...assigneeList]} value={assignee} onChange={setAssignee} />
-      </div>
+      <AnalysisFilters
+        category={category}
+        setCategory={setCategory}
+        confidence={confidence}
+        setConfidence={setConfidence}
+        assignee={assignee}
+        setAssignee={setAssignee}
+        assigneeList={assigneeList}
+        resultCount={filtered.length}
+      />
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <KpiCard label="総案件数" value={overall.total} suffix="件" />
