@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Legend, Cell, LabelList, ReferenceLine,
+  Tooltip, ResponsiveContainer, Legend, Cell, LabelList, ReferenceLine, ComposedChart,
 } from "recharts";
 import {
   Search, Plus, MoreHorizontal, ChevronDown, ChevronRight, ChevronLeft, X,
@@ -10,13 +10,18 @@ import {
   TrendingUp, TrendingDown, Building2, Truck, Menu, MapPin, FileCheck,
   ArrowUpDown, Target, Link2, FileText, Upload, AlertTriangle, RefreshCw, Repeat, BarChart4,
 } from "lucide-react";
+import { parseSalesFile, ALLOWED_ASSIGNEES } from "./planImport";
 
 /* ------------------------------------------------------------------ */
 /* 定数・ユーティリティ                                                */
 /* ------------------------------------------------------------------ */
 
 const CATEGORIES = ["WEB", "グラフィック", "動画", "AI", "SNS", "未設定"];
-const ASSIGNEES = ["松本", "木村", "林", "清水"];
+// ダミーデータを使うかどうか（true に戻すとサンプルの案件・訪問記録・ストック・担当者が表示される）
+const USE_DEMO_SEED = false;
+const DEMO_ASSIGNEES = ["松本", "木村", "林", "清水"];
+// 担当者の初期リスト（ダミーを使わないときは実際の担当者）
+const ASSIGNEES = USE_DEMO_SEED ? DEMO_ASSIGNEES : ALLOWED_ASSIGNEES;
 const DEAL_TYPES = ["新規", "既存"];
 
 const STATUS_LABEL = {
@@ -368,12 +373,13 @@ const CONF_LABEL = { 1: "COOL", 2: "WARM", 3: "HOT" };
 const CONF_HINT = { 1: "可能性低め", 2: "五分五分", 3: "可能性が高い" };
 
 function monthLabel(m) {
+  if (!m) return "受注月未定";
   const [y, mo] = m.split("-");
   return `${y}年${parseInt(mo, 10)}月`;
 }
 
 function yearOf(m) {
-  return m.slice(0, 4);
+  return m ? m.slice(0, 4) : "未定";
 }
 
 function currentMonthKey() {
@@ -709,6 +715,118 @@ function applyUnyoDiff(stocks, diff) {
   return [...out, ...diff.added];
 }
 
+/* ---------------- 売上計画・アタックリストCSV → 案件 ---------------- */
+// 制作基礎数字のグラフ色
+const BASE_REVENUE_LABEL = "制作基礎数字";
+const STOCK_REVENUE_LABEL = "ストック";
+const REVENUE_EXTRA_COLORS = { [BASE_REVENUE_LABEL]: "#475569", [STOCK_REVENUE_LABEL]: "#a78bfa" };
+
+// 金額表示（赤枠・月間売上反映済に対応）
+function amountInfo(p) {
+  if (p.reflectedInMonthly) return { text: "月間売上反映済", cls: "text-emerald-600 text-xs font-medium" };
+  if (p.amountMissing && !(p.status === "won" || p.status === "delivered" ? Number(p.confirmedAmount) : Number(p.estimatedAmount)))
+    return { text: "金額未記入", cls: "text-rose-600 text-xs font-semibold" };
+  const v = p.status === "won" || p.status === "delivered" ? p.confirmedAmount ?? p.estimatedAmount : p.estimatedAmount;
+  return { text: formatManYen(v), cls: "" };
+}
+const missingFrame = (p) => p.amountMissing && !p.reflectedInMonthly && !(Number(p.estimatedAmount) || Number(p.confirmedAmount));
+
+function salesItemToProject(x, source) {
+  const now = todayIso();
+  const base = {
+    id: uid(),
+    name: x.name,
+    clientName: x.clientName,
+    category: x.category || "未設定",
+    scheduledMonth: x.month || null,
+    assignee: normalizeCsvAssignee(x.assignee) || x.assignee || "",
+    dealType: "新規",
+    registeredDate: todayDateStr(),
+    deliveryDueDate: null,
+    deliveredAt: null,
+    quoteSubmitted: false,
+    quoteSubmittedAt: null,
+    quotedAmount: null,
+    contactName: "",
+    contactEmail: "",
+    memo: x.note || "",
+    progressNotes: x.progress ? [{ id: uid(), date: x.updated ? new Date(`${x.updated}T00:00:00`).toISOString() : now, text: x.progress }] : [],
+    archived: false,
+    isReference: false,
+    importKey: x.key,
+    importedFrom: source,
+    amountMissing: !x.amount,
+    reflectedInMonthly: false,
+    createdAt: now,
+    updatedAt: x.updated ? new Date(`${x.updated}T00:00:00`).toISOString() : now,
+  };
+  let extra;
+  if (source === "plan" && x.kind === "confirmed") {
+    extra = x.amount
+      ? { status: "won", confidence: 3, estimatedAmount: x.amount, confirmedAmount: x.amount }
+      : { status: "delivered", confidence: 3, estimatedAmount: 0, confirmedAmount: 0, reflectedInMonthly: true, amountMissing: false };
+  } else if (source === "plan") {
+    extra = { status: "active", confidence: 3, estimatedAmount: x.amount || 0, confirmedAmount: null };
+  } else if (x.stage === "reference") {
+    extra = { status: "active", confidence: 1, isReference: true, estimatedAmount: x.amount || 0, confirmedAmount: null };
+  } else if (x.stage === "won") {
+    extra = { status: "won", confidence: 2, estimatedAmount: x.amount || 0, confirmedAmount: x.amount || 0 };
+  } else if (x.stage === "lost") {
+    extra = { status: "lost", confidence: 2, estimatedAmount: x.amount || 0, confirmedAmount: null };
+  } else {
+    extra = { status: "active", confidence: 2, estimatedAmount: x.amount || 0, confirmedAmount: null };
+  }
+  const p = { ...base, ...extra };
+  p.history = [{ id: uid(), date: now, type: "created", label: source === "plan" ? "売上計画CSVから登録" : "アタックリストCSVから登録", scheduledMonth: p.scheduledMonth }];
+  if (p.status === "won" || p.status === "delivered") p.history.push({ id: uid(), date: now, type: "won", label: "受注", previousStatus: "active" });
+  if (p.status === "lost") p.history.push({ id: uid(), date: now, type: "lost", label: "ロスト", previousStatus: "active" });
+  return p;
+}
+
+const SALES_COMPARE_FIELDS = ["status", "scheduledMonth", "estimatedAmount", "confirmedAmount", "assignee", "isReference", "confidence", "reflectedInMonthly", "name", "clientName"];
+function progressTextOf(p) {
+  return (p.progressNotes || []).map((n) => n.text).join("\n");
+}
+function diffSalesProjects(existing, incoming) {
+  const byKey = new Map(existing.filter((p) => p.importKey).map((p) => [p.importKey, p]));
+  const added = [];
+  const changed = [];
+  const unchanged = [];
+  for (const next of incoming) {
+    const old = byKey.get(next.importKey);
+    if (!old) {
+      added.push(next);
+      continue;
+    }
+    const fields = SALES_COMPARE_FIELDS.filter((f) => (old[f] ?? null) !== (next[f] ?? null));
+    const progressChanged = next.importedFrom === "attack" && progressTextOf(next) && !progressTextOf(old).includes(progressTextOf(next));
+    if (fields.length || progressChanged) changed.push({ old, next, fields, progressChanged });
+    else unchanged.push({ old, next });
+  }
+  return { added, changed, unchanged };
+}
+function applySalesDiff(projects, diff) {
+  const now = todayIso();
+  const map = new Map(diff.changed.map((c) => [c.old.id, c]));
+  const out = projects.map((p) => {
+    const c = map.get(p.id);
+    if (!c) return p;
+    const patch = {};
+    SALES_COMPARE_FIELDS.forEach((f) => (patch[f] = c.next[f]));
+    patch.amountMissing = c.next.amountMissing;
+    patch.category = p.category === "未設定" ? c.next.category : p.category;
+    const notes = c.progressChanged ? [...(p.progressNotes || []), ...c.next.progressNotes] : p.progressNotes;
+    return {
+      ...p,
+      ...patch,
+      progressNotes: notes,
+      updatedAt: now,
+      history: [...(p.history || []), { id: uid(), date: now, type: "updated", label: `CSVで更新（${c.fields.length ? c.fields.length + "項目" : "進捗"}）` }],
+    };
+  });
+  return [...out, ...diff.added];
+}
+
 // ストック（月額）契約が指定月に有効か。
 function stockActiveIn(stock, month) {
   return stock.startMonth <= month && (!stock.endMonth || month <= stock.endMonth);
@@ -747,7 +865,7 @@ function seedProjects() {
         const confidence = ((clientIdx + ci) % 3) + 1;
         const status = statuses[(clientIdx + mi) % statuses.length];
         const wonFamily = status === "won" || status === "delivered";
-        const assignee = ASSIGNEES[clientIdx % ASSIGNEES.length];
+        const assignee = DEMO_ASSIGNEES[clientIdx % DEMO_ASSIGNEES.length];
         const dealType = dealTypes[clientIdx % dealTypes.length];
         const estimatedAmount = roundTo10k(BASE_AMOUNT[cat] * (1 + (((clientIdx % 5) - 2) * 0.15)));
         const confirmedAmount = wonFamily ? roundTo10k(estimatedAmount * (0.9 + (clientIdx % 3) * 0.05)) : null;
@@ -835,7 +953,7 @@ function seedArchivedProjects() {
       const month = baseMonths[(ci * 3 + d * 4) % baseMonths.length];
       const cat = CATEGORIES.filter((c) => c !== "未設定")[(ci + d) % (CATEGORIES.length - 1)];
       const name = PROJECT_NAMES[cat][(ci + d) % PROJECT_NAMES[cat].length];
-      const assignee = ASSIGNEES[(ci + d) % ASSIGNEES.length];
+      const assignee = DEMO_ASSIGNEES[(ci + d) % DEMO_ASSIGNEES.length];
       const dealType = (ci + d) % 2 === 0 ? "新規" : "既存";
       const estimatedAmount = roundTo10k(BASE_AMOUNT[cat] * (1 + (((ci + d) % 5 - 2) * 0.15)));
       const status = (ci + d) % 4 === 3 ? "lost" : "won";
@@ -1334,7 +1452,7 @@ function MonthSection({ month, projects, defaultOpen, onAction, onOpenDetail }) 
                 {projects.map((p) => (
                   <tr
                     key={p.id}
-                    className="border-t border-slate-100 hover:bg-slate-50/60 cursor-pointer"
+                    className={`cursor-pointer border-t ${missingFrame(p) ? "border-rose-200 bg-rose-50/50 outline outline-2 -outline-offset-2 outline-rose-400" : "border-slate-100 hover:bg-slate-50/60"}`}
                     onClick={() => onOpenDetail(p)}
                   >
                     <td className="max-w-[260px] truncate px-5 py-3 font-semibold text-slate-900">{p.clientName}</td>
@@ -1342,9 +1460,7 @@ function MonthSection({ month, projects, defaultOpen, onAction, onOpenDetail }) 
                     <td className="px-3 py-3"><CategoryPill category={p.category} /></td>
                     <td className="px-3 py-3 whitespace-nowrap text-slate-500">{p.assignee}</td>
                     <td className="px-3 py-3"><ConfidenceStars value={p.confidence} /></td>
-                    <td className="px-3 py-3 whitespace-nowrap tabular-nums text-slate-600">
-                      {p.status === "won" || p.status === "delivered" ? formatManYen(p.confirmedAmount) : formatManYen(p.estimatedAmount)}
-                    </td>
+                    <td className={`px-3 py-3 whitespace-nowrap tabular-nums text-slate-600 ${amountInfo(p).cls}`}>{amountInfo(p).text}</td>
                     <td className="px-3 py-3">
                       <div className="flex flex-wrap items-center gap-1">
                         <StatusBadge status={p.status} />
@@ -1367,7 +1483,7 @@ function MonthSection({ month, projects, defaultOpen, onAction, onOpenDetail }) 
               <div
                 key={p.id}
                 onClick={() => onOpenDetail(p)}
-                className="cursor-pointer rounded-xl border border-slate-200 p-3 active:bg-slate-50"
+                className={`cursor-pointer rounded-xl border p-3 active:bg-slate-50 ${missingFrame(p) ? "border-2 border-rose-400 bg-rose-50/40" : "border-slate-200"}`}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -1386,9 +1502,7 @@ function MonthSection({ month, projects, defaultOpen, onAction, onOpenDetail }) 
                 </div>
                 <div className="mt-2 flex items-center justify-between text-xs">
                   <span className="text-slate-400">担当：{p.assignee}</span>
-                  <span className="font-medium tabular-nums text-slate-700">
-                    {p.status === "won" || p.status === "delivered" ? formatManYen(p.confirmedAmount) : formatManYen(p.estimatedAmount)}
-                  </span>
+                  <span className={`font-medium tabular-nums text-slate-700 ${amountInfo(p).cls}`}>{amountInfo(p).text}</span>
                 </div>
                 <div className="mt-1 text-xs text-slate-400">更新日：{fmtDate(p.updatedAt)}</div>
               </div>
@@ -1447,7 +1561,7 @@ function TargetForm({ initial, onSubmit, onCancel }) {
 
 function ProjectForm({ initial, companies = [], assignees = ASSIGNEES, onSubmit, onCancel }) {
   const [form, setForm] = useState(
-    initial ?? {
+    (initial && { ...initial, scheduledMonth: initial.scheduledMonth || "", monthUndecided: !initial.scheduledMonth }) || {
       name: "",
       clientName: "",
       category: "WEB",
@@ -1465,7 +1579,7 @@ function ProjectForm({ initial, companies = [], assignees = ASSIGNEES, onSubmit,
   const valid =
     form.name.trim() &&
     form.clientName.trim() &&
-    form.scheduledMonth &&
+    (form.scheduledMonth || form.monthUndecided) &&
     form.registeredDate &&
     form.estimatedAmount !== "" &&
     Number(form.estimatedAmount) >= 0;
@@ -1518,12 +1632,23 @@ function ProjectForm({ initial, companies = [], assignees = ASSIGNEES, onSubmit,
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="text-xs font-medium text-slate-500">受注予定月 *</label>
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-medium text-slate-500">受注予定月 *</label>
+            <label className="flex items-center gap-1 text-[11px] text-slate-500">
+              <input
+                type="checkbox"
+                checked={!!form.monthUndecided}
+                onChange={(e) => setForm({ ...form, monthUndecided: e.target.checked, scheduledMonth: e.target.checked ? "" : currentMonthKey() })}
+              />
+              未定
+            </label>
+          </div>
           <input
             type="month"
-            value={form.scheduledMonth}
+            value={form.scheduledMonth || ""}
+            disabled={!!form.monthUndecided}
             onChange={(e) => setForm({ ...form, scheduledMonth: e.target.value })}
-            className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+            className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-50 disabled:text-slate-400"
           />
         </div>
         <div>
@@ -2321,23 +2446,29 @@ function YoyBadge({ yoy }) {
   );
 }
 
-function MonthlyRevenuePage({ projects, monthlyTarget = 0 }) {
-  const catColor = PROJECT_CAT_COLORS;
+// 毎月の売上 = 確定案件（運用・管理を除く）+ 制作基礎数字 + ストック売上
+function MonthlyRevenuePage({ projects, monthlyTarget = 0, targetFor, stocks = [], baseOf = () => 0 }) {
+  const catColor = { ...PROJECT_CAT_COLORS, ...REVENUE_EXTRA_COLORS };
+  const revenueCats = [...CATEGORIES, BASE_REVENUE_LABEL, STOCK_REVENUE_LABEL];
   const curFy = fiscalStart(currentMonthKey());
   const [fy, setFy] = useState(curFy);
   const isConfirmed = (p) => p.status === "won" || p.status === "delivered";
   const confirmedOf = (list) => list.filter(isConfirmed).reduce((a, p) => a + (Number(p.confirmedAmount) || 0), 0);
-  const monthValue = (m, c) => confirmedOf(projects.filter((p) => p.scheduledMonth === m && p.category === c));
+  const stockOf = (m) => stocks.filter((st) => stockActiveIn(st, m)).reduce((a, st) => a + (Number(st.monthlyAmount) || 0), 0);
+  const monthValue = (m, c) =>
+    c === BASE_REVENUE_LABEL ? baseOf(m) : c === STOCK_REVENUE_LABEL ? stockOf(m) : confirmedOf(projects.filter((p) => p.scheduledMonth === m && p.category === c));
+  const totalOf = (m) => revenueCats.reduce((a, c) => a + monthValue(m, c), 0);
   const periods = fiscalPeriods(fy);
   const thisMonth = currentMonthKey();
   const rows = periods.map(({ key: m, isFuture }) => {
     const list = projects.filter((p) => p.scheduledMonth === m);
     const c = computeCounts(list);
-    const byCat = CATEGORIES.map((cat) => ({ cat, v: confirmedOf(list.filter((p) => p.category === cat)) })).filter((x) => x.v > 0);
+    const byCat = revenueCats.map((cat) => ({ cat, v: monthValue(m, cat) })).filter((x) => x.v > 0);
     const prevYear = `${Number(m.slice(0, 4)) - 1}${m.slice(4)}`;
-    const prevYearTotal = confirmedOf(projects.filter((p) => p.scheduledMonth === prevYear));
-    const yoy = !isFuture && prevYearTotal > 0 ? Math.round(((c.confirmedTotal - prevYearTotal) / prevYearTotal) * 1000) / 10 : null;
-    return { month: m, isFuture, ...c, byCat, yoy };
+    const total = totalOf(m);
+    const prevYearTotal = totalOf(prevYear);
+    const yoy = !isFuture && prevYearTotal > 0 ? Math.round(((total - prevYearTotal) / prevYearTotal) * 1000) / 10 : null;
+    return { month: m, isFuture, ...c, confirmedTotal: total, byCat, yoy };
   });
   const maxRev = Math.max(1, ...rows.map((r) => r.confirmedTotal));
   const fyOptions = [addMonths(curFy, -12), curFy];
@@ -2365,9 +2496,9 @@ function MonthlyRevenuePage({ projects, monthlyTarget = 0 }) {
       <StackedTrendCard
         key={fy}
         title={`月別の確定金額（${fiscalLabel(fy)}）`}
-        note="棒の上の数字は月の合計（万円）、その上は目標に対する差額（緑＝達成・赤＝未達）。点線は月間目標です。"
-        target={monthlyTarget}
-        categories={CATEGORIES}
+        note="月の売上＝確定案件（運用・管理を除く）＋制作基礎数字＋ストック。棒の上は合計（万円）と目標との差額（緑＝達成・赤＝未達）、点線は月ごとの目標です。"
+        target={targetFor || monthlyTarget}
+        categories={revenueCats}
         colors={catColor}
         ranges={[{ key: fy, label: fiscalLabel(fy), periods }]}
         valueOf={monthValue}
@@ -2415,7 +2546,8 @@ function MonthlyRevenuePage({ projects, monthlyTarget = 0 }) {
 }
 
 function YearlyRevenuePage({ projects }) {
-  const years = Array.from(new Set(projects.map((p) => yearOf(p.scheduledMonth)))).sort();
+  const yearsFound = Array.from(new Set(projects.map((p) => yearOf(p.scheduledMonth)))).sort();
+  const years = yearsFound.length ? yearsFound : [String(new Date().getFullYear())]; // データがなくても今年を表示
   const rows = years.map((y, i) => {
     const list = projects.filter((p) => yearOf(p.scheduledMonth) === y);
     const c = computeCounts(list);
@@ -2581,10 +2713,11 @@ function sinceLabel(dateStr) {
 }
 
 function StatTile({ label, value, unit, sub, tone = "text-slate-900" }) {
+  const narrow = useWindowWidth() < 640;
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="text-xs text-slate-500">{label}</div>
-      <div className={`mt-1 tabular-nums ${tone}`} style={{ ...NUM_FONT_STYLE, fontWeight: 500, fontSize: 28, lineHeight: 1.1 }}>
+      <div className={`mt-1 whitespace-nowrap tabular-nums ${tone}`} style={{ ...NUM_FONT_STYLE, fontWeight: 500, fontSize: narrow ? 22 : 28, lineHeight: 1.1 }}>
         {value}
         {unit && <span className="ml-1 text-sm font-semibold">{unit}</span>}
       </div>
@@ -3080,28 +3213,30 @@ function CompanyListPage({ projects, onOpenDetail, visits, onAddVisit, stocks = 
 /* ダッシュボード：月ごとの状況（今月フォーカス）                      */
 /* ------------------------------------------------------------------ */
 
-function DashboardHero({ month, projects, stocks, target, onEditTarget, onChangeMonth, monthChoices }) {
+function DashboardHero({ month, projects, stocks, target, onEditTarget, onChangeMonth, monthChoices, baseOf = () => 0, refs = [] }) {
   const list = projects.filter((p) => p.scheduledMonth === month);
   const c = computeCounts(list);
+  // 確定金額 = 受注・納品済みの合計 + 制作基礎数字
+  const confirmed = c.confirmedTotal + baseOf(month);
   const open = list.filter((p) => p.status === "active");
   const sumOf = (arr) => arr.reduce((a, p) => a + (Number(p.estimatedAmount) || 0), 0);
   const hot = sumOf(open.filter((p) => p.confidence === 3));
   const warm = sumOf(open.filter((p) => p.confidence === 2));
-  const cool = sumOf(open.filter((p) => p.confidence === 1));
+  const cool = sumOf(open.filter((p) => p.confidence === 1)) + sumOf(refs.filter((p) => p.scheduledMonth === month && p.status === "active")); // 参考見積りもCOOLに含める
   const stock = stocks.filter((st) => stockActiveIn(st, month)).reduce((a, st) => a + st.monthlyAmount, 0);
   const postponed = projects.reduce((acc, p) => acc + p.history.filter((h) => h.type === "postponed" && h.fromMonth === month).length, 0);
   const isNow = month === currentMonthKey();
-  const pct = target > 0 ? Math.round((c.confirmedTotal / target) * 100) : 0;
-  const remain = target - c.confirmedTotal;
+  const pct = target > 0 ? Math.round((confirmed / target) * 100) : 0;
+  const remain = target - confirmed;
   const manN = (n) => Math.round(n / 10000).toLocaleString("ja-JP");
 
   // リング：目標額（超えていれば合計額）を一周として、確定→HOT→WARM→COOLを積み上げる
   const R = 58;
   const C = 2 * Math.PI * R;
-  const base = Math.max(target, c.confirmedTotal + hot + warm + cool, 1);
+  const base = Math.max(target, confirmed + hot + warm + cool, 1);
   let off = 0;
   const segs = [
-    [c.confirmedTotal, "#059669", 1],
+    [confirmed, "#059669", 1],
     [hot, "#e11d48", 0.55],
     [warm, "#d97706", 0.55],
     [cool, "#0284c7", 0.55],
@@ -3127,9 +3262,9 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
 
   // 直近6か月の確定金額（ミニ推移）
   const trendMonths = Array.from({ length: 6 }, (_, i) => addMonths(month, i - 5));
-  const trend = trendMonths.map((m) => ({ m, v: computeCounts(projects.filter((p) => p.scheduledMonth === m)).confirmedTotal }));
+  const trend = trendMonths.map((m) => ({ m, v: computeCounts(projects.filter((p) => p.scheduledMonth === m)).confirmedTotal + baseOf(m) }));
   const trendMax = Math.max(target, ...trend.map((t) => t.v), 1);
-  const forecast = c.confirmedTotal + hot + warm + cool;
+  const forecast = confirmed + hot + warm + cool;
   const barBase = Math.max(target, forecast, 1);
   const barPct = (v) => `${(v / barBase) * 100}%`;
   const numStyle = (size, weight = 500) => ({ fontFamily: "var(--font-num)", fontWeight: weight, fontSize: size, lineHeight: 1.1 });
@@ -3213,7 +3348,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
             <div>
               <div className="text-xs text-slate-500">確定金額</div>
               <div className="tabular-nums text-emerald-700" style={numStyle(34, 600)}>
-                {manN(c.confirmedTotal)}
+                {manN(confirmed)}
                 <span className="ml-1 text-sm font-semibold">万円</span>
               </div>
             </div>
@@ -3229,7 +3364,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
           <div>
             <div className="relative h-3 overflow-visible rounded-full" style={{ background: "var(--c-track)" }}>
               <div className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full" style={{ width: barPct(forecast) }}>
-                {[[c.confirmedTotal, "#059669", 1], [hot, "#e11d48", 0.6], [warm, "#d97706", 0.6], [cool, "#0284c7", 0.6]]
+                {[[confirmed, "#059669", 1], [hot, "#e11d48", 0.6], [warm, "#d97706", 0.6], [cool, "#0284c7", 0.6]]
                   .filter((x) => x[0] > 0)
                   .map(([v, col, op], i) => (
                     <div key={i} style={{ flexGrow: v, flexBasis: 0, background: col, opacity: op }} />
@@ -3472,8 +3607,10 @@ function useIsDesktop() {
 }
 
 
-function MonthlyPage({ projects, stocks = [], onOpenDetail, monthlyTarget = 0, assignees = [], scope = "all", onScopeChange }) {
+function MonthlyPage({ projects, stocks = [], onOpenDetail, monthlyTarget = 0, targetFor, assignees = [], scope = "all", onScopeChange, baseOf = () => 0, refs = [] }) {
   const per = Math.round(monthlyTarget / Math.max(1, assignees.length));
+  const tFor = targetFor || (() => monthlyTarget);
+  const perFor = (m) => Math.round(tFor(m) / Math.max(1, assignees.length));
   const isAll = scope === "all" || !assignees.includes(scope);
   const tabs = [{ key: "all", label: "全体" }, ...assignees.map((a) => ({ key: a, label: a }))];
   return (
@@ -3496,25 +3633,27 @@ function MonthlyPage({ projects, stocks = [], onOpenDetail, monthlyTarget = 0, a
       <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
         <h2 className="text-sm font-semibold text-slate-700">{isAll ? "月別売り上げ（全体）" : `月別売り上げ（${scope}）`}</h2>
         <span className="text-xs text-slate-400">
-          月間目標 {formatManYen(isAll ? monthlyTarget : per)}{!isAll && "（全体目標を担当人数で割った額）"}
+          月間目標 {formatManYen(isAll ? tFor(currentMonthKey()) : perFor(currentMonthKey()))}（今月）{!isAll && "・全体目標を担当人数で割った額"}
         </span>
       </div>
       {isAll ? (
-        <MonthlyTable key="all" projects={projects} stocks={stocks} onOpenDetail={onOpenDetail} target={monthlyTarget} />
+        <MonthlyTable key="all" projects={projects} stocks={stocks} onOpenDetail={onOpenDetail} targetFor={tFor} baseOf={baseOf} refs={refs} />
       ) : (
         <MonthlyTable
           key={scope}
           projects={projects.filter((p) => p.assignee === scope)}
           stocks={stocks.filter((st) => st.assignee === scope)}
           onOpenDetail={onOpenDetail}
-          target={per}
+          targetFor={perFor}
+          refs={refs.filter((p) => p.assignee === scope)}
         />
       )}
     </div>
   );
 }
 
-function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0 }) {
+function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetFor, baseOf = () => 0, refs = [] }) {
+  const tFor = targetFor || (() => target);
   const [openMonth, setOpenMonth] = useState(null);
   const isDesktop = useIsDesktop();
   const presentMonths = projects.map((p) => p.scheduledMonth);
@@ -3529,22 +3668,28 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0 }) {
     const open = list.filter((p) => p.status === "active");
     const stockList = stocks.filter((st) => stockActiveIn(st, m));
     const stockTotal = stockList.reduce((a, st) => a + (st.monthlyAmount || 0), 0);
-    const forecast = c.confirmedTotal + sum(open);
+    const baseAmt = baseOf(m);
+    const refList = refs.filter((p) => p.scheduledMonth === m && p.status === "active");
+    const confirmedAll = c.confirmedTotal + baseAmt;
+    const forecast = confirmedAll + sum(open) + sum(refList);
     return {
       month: m,
       list,
       stockList,
+      baseAmt,
+      refList,
       caseCount: c.total,
       won: c.won,
       lost: c.lost,
       rate: c.rate,
-      confirmed: c.confirmedTotal,
+      confirmed: confirmedAll,
       hot: sum(open.filter((p) => p.confidence === 3)),
       warm: sum(open.filter((p) => p.confidence === 2)),
-      cool: sum(open.filter((p) => p.confidence === 1)),
+      cool: sum(open.filter((p) => p.confidence === 1)) + sum(refList),
       stock: stockTotal,
       grand: forecast,
-      remain: target - c.confirmedTotal,
+      target: tFor(m),
+      remain: tFor(m) - confirmedAll,
     };
   });
 
@@ -3566,14 +3711,24 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0 }) {
         <div className="text-xs text-slate-500">
           案件 {r.caseCount}件／受注 {r.won}・ロスト {r.lost}／受注率 {r.rate ?? "—"}{r.rate !== null ? "%" : ""}
         </div>
+        {r.baseAmt > 0 && (
+          <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+            <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: REVENUE_EXTRA_COLORS[BASE_REVENUE_LABEL] }} />
+              制作基礎数字
+              <span className="text-[11px] font-normal text-slate-400">確定金額に含む</span>
+            </span>
+            <span className="text-sm font-medium tabular-nums text-slate-700">{formatManYen(r.baseAmt)}</span>
+          </div>
+        )}
         {r.list.length === 0 && <div className="text-sm text-slate-400">この月の案件はありません</div>}
         {r.list.map((p) => {
-          const amount = p.status === "won" || p.status === "delivered" ? p.confirmedAmount ?? p.estimatedAmount : p.estimatedAmount;
+          const ai = amountInfo(p);
           return (
             <button
               key={p.id}
               onClick={() => onOpenDetail && onOpenDetail(p)}
-              className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-left hover:border-indigo-300"
+              className={`flex w-full items-center justify-between gap-3 rounded-lg border bg-white px-3 py-2.5 text-left hover:border-indigo-300 ${missingFrame(p) ? "border-2 border-rose-400 bg-rose-50/40" : "border-slate-200"}`}
             >
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold text-slate-900">{p.clientName}</div>
@@ -3584,12 +3739,27 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0 }) {
                 </div>
               </div>
               <div className="flex shrink-0 flex-col items-end gap-1">
-                <span className="text-sm font-medium tabular-nums text-slate-700">{formatManYen(amount)}</span>
+                <span className={`text-sm font-medium tabular-nums text-slate-700 ${ai.cls}`}>{ai.text}</span>
                 <StatusBadge status={p.status} />
               </div>
             </button>
           );
         })}
+        {r.refList.length > 0 && (
+          <div>
+            <div className="mb-1 flex items-center gap-1 text-xs font-medium text-sky-700">
+              <FileText size={12} /> 参考見積り（COOLに含む） {formatManYen(r.refList.reduce((x, p) => x + (Number(p.estimatedAmount) || 0), 0))}
+            </div>
+            <div className="flex flex-col gap-1">
+              {r.refList.map((p) => (
+                <button key={p.id} onClick={() => onOpenDetail && onOpenDetail(p)} className={`flex justify-between rounded-lg border bg-white px-3 py-2 text-left text-xs ${missingFrame(p) ? "border-2 border-rose-400" : "border-sky-100"}`}>
+                  <span className="min-w-0 truncate"><b className="text-slate-800">{p.clientName}</b> <span className="text-slate-500">{p.name}</span></span>
+                  <span className={`shrink-0 tabular-nums text-slate-700 ${amountInfo(p).cls}`}>{amountInfo(p).text}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {r.stockList.length > 0 && (
           <div>
             <div className="mb-1 flex items-center gap-1 text-xs font-medium text-violet-600">
@@ -3625,7 +3795,7 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0 }) {
     const isNow = r.month === thisMonth;
     const decided = r.won + r.lost;
     const winW = decided ? (r.won / decided) * 100 : 0;
-    const done = target > 0 && r.remain <= 0;
+    const done = r.target > 0 && r.remain <= 0;
     const cardStyle = isNow
       ? { background: "linear-gradient(var(--c-card),var(--c-card)) padding-box, linear-gradient(120deg,var(--c-now-a),var(--c-now-b)) border-box", border: "2px solid transparent" }
       : isOpen
@@ -3681,7 +3851,7 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0 }) {
           <div className={done ? "bg-emerald-50 text-emerald-700" : "bg-indigo-50 text-indigo-700"} style={{ borderRadius: 16, padding: "12px 14px" }}>
             <div className="text-xs">目標まであと</div>
             <div className="mt-1 tabular-nums" style={{ ...NUM_FONT, fontWeight: 500, fontSize: 26, lineHeight: 1.1 }}>
-              {!target ? "—" : done ? "達成" : <>{manN(r.remain)}<span className="ml-0.5 text-[13px] font-semibold">万円</span></>}
+              {!r.target ? "—" : done ? "達成" : <>{manN(r.remain)}<span className="ml-0.5 text-[13px] font-semibold">万円</span></>}
             </div>
           </div>
         </div>
@@ -3834,7 +4004,7 @@ function StackedTrendCard({
   valueOf, // (periodKey, category) => 円
   nowLabel = "今月",
   summary, // ({ sumFor, periods, current }) => [{ label, value, tone }]
-  target = 0, // 目標金額（円）。指定すると横線と、目標に対する差額（黒字は緑・赤字は赤）を表示
+  target = 0, // 目標金額（円）または (期間key) => 円。指定すると目標ラインと、目標に対する差額（達成は緑・未達は赤）を表示
 }) {
   const [hidden, setHidden] = useState([]);
   const narrow = useWindowWidth() < 640;
@@ -3851,6 +4021,7 @@ function StackedTrendCard({
     const row = { ...p };
     categories.forEach((c) => (row[c] = hidden.includes(c) ? 0 : (valueOf(p.key, c) || 0) / 10000));
     row.total = visibleCats.reduce((a, c) => a + row[c], 0);
+    row.target = (typeof target === "function" ? target(p.key) : target) / 10000 || 0;
     return row;
   });
   const current = periods.find((p) => p.isNow) || periods[periods.length - 1];
@@ -3859,8 +4030,8 @@ function StackedTrendCard({
   const toggle = (c) => setHidden((h) => (h.includes(c) ? h.filter((x) => x !== c) : [...h, c]));
   const crowded = narrow && periods.length > 6;
   const tiles = summary ? summary({ sumFor, periods, current }) : [];
-  const targetMan = target > 0 ? target / 10000 : 0;
-  const diffOf = (row) => (targetMan && !row.isFuture ? row.total - targetMan : null);
+  const hasTarget = data.some((r) => r.target > 0);
+  const diffOf = (row) => (row.target > 0 && !row.isFuture ? row.total - row.target : null);
   const fmtDiff = (d) => `${d >= 0 ? "+" : "−"}${fmt(Math.abs(d))}万円`;
   const DIFF_UP = "#059669";
   const DIFF_DOWN = "#e11d48";
@@ -3901,6 +4072,25 @@ function StackedTrendCard({
     );
   }
 
+  // 月ごとの目標ライン（目標が変わる月はそこで段差になる）
+  function TargetTick({ x, y, width, index }) {
+    const row = data[index];
+    if (!row || !(row.target > 0)) return null;
+    const pad = width * 0.15;
+    const prev = data[index - 1];
+    const showLabel = !prev || prev.target !== row.target;
+    return (
+      <g>
+        <line x1={x - pad} x2={x + width + pad} y1={y} y2={y} stroke="#e11d48" strokeWidth={1.5} strokeDasharray="6 4" />
+        {showLabel && (
+          <text x={x - pad + 2} y={y - 5} style={{ fontSize: narrow ? 9.5 : 10.5, fontWeight: 700, fill: "#e11d48" }}>
+            目標 {fmt(row.target)}万
+          </text>
+        )}
+      </g>
+    );
+  }
+
   function TrendTooltip({ active, payload }) {
     if (!active || !payload || !payload.length) return null;
     const row = payload[0].payload;
@@ -3925,14 +4115,14 @@ function StackedTrendCard({
           <span>合計</span>
           <span className="tabular-nums">{fmt(row.total)}万円</span>
         </div>
-        {targetMan > 0 && (
+        {row.target > 0 && (
           <div className="mt-1 flex items-center justify-between text-[11px]">
-            <span className="text-slate-500">目標 {fmt(targetMan)}万円に対して</span>
+            <span className="text-slate-500">目標 {fmt(row.target)}万円に対して</span>
             {row.isFuture ? (
               <span className="text-slate-400">—</span>
             ) : (
-              <span className="tabular-nums font-semibold" style={{ color: row.total - targetMan >= 0 ? DIFF_UP : DIFF_DOWN }}>
-                {fmtDiff(row.total - targetMan)}
+              <span className="tabular-nums font-semibold" style={{ color: row.total - row.target >= 0 ? DIFF_UP : DIFF_DOWN }}>
+                {fmtDiff(row.total - row.target)}
               </span>
             )}
           </div>
@@ -3994,7 +4184,7 @@ function StackedTrendCard({
 
       <div className="mt-3 h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart key={`${rangeKey}-${hidden.join(",")}`} data={data} margin={{ top: targetMan ? 58 : 40, right: targetMan && !narrow ? 70 : 4, left: 0, bottom: 0 }} barCategoryGap="22%">
+          <ComposedChart key={`${rangeKey}-${hidden.join(",")}`} data={data} margin={{ top: hasTarget ? 58 : 40, right: 4, left: 0, bottom: 0 }} barCategoryGap="22%">
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" strokeOpacity={0.6} />
             <XAxis
               dataKey="label"
@@ -4015,7 +4205,7 @@ function StackedTrendCard({
               axisLine={false}
               tickLine={false}
               width={40}
-              domain={[0, (max) => { const v = Math.max(max, targetMan * 1.08) || 1; const step = v > 500 ? 100 : v > 100 ? 50 : 10; return Math.ceil(v / step) * step; }]}
+              domain={[0, (max) => { const v = max * 1.04 || 1; const step = v > 2000 ? 500 : v > 500 ? 100 : v > 100 ? 50 : 10; return Math.ceil(v / step) * step; }]}
             />
             <Tooltip content={<TrendTooltip />} cursor={{ fill: "rgba(148,163,184,.12)", radius: 8 }} />
             {visibleCats.map((c, i) => (
@@ -4037,28 +4227,9 @@ function StackedTrendCard({
                 {c === lastCat && <LabelList content={<TotalLabel />} />}
               </Bar>
             ))}
-            {targetMan > 0 && (
-              <ReferenceLine
-                y={targetMan}
-                stroke="#e11d48"
-                strokeDasharray="6 4"
-                strokeWidth={1.5}
-                ifOverflow="extendDomain"
-                label={({ viewBox }) => (
-                  <g>
-                    {narrow ? (
-                      <text x={viewBox.x + 4} y={viewBox.y - 5} style={{ fontSize: 10, fontWeight: 700, fill: "#e11d48" }}>目標 {fmt(targetMan)}万</text>
-                    ) : (
-                      <g transform={`translate(${viewBox.x + viewBox.width + 6}, ${viewBox.y})`}>
-                        <rect x={0} y={-10} width={62} height={20} rx={10} fill="#e11d48" />
-                        <text x={31} y={4} textAnchor="middle" style={{ fontSize: 10.5, fontWeight: 700, fill: "#fff" }}>目標 {fmt(targetMan)}万</text>
-                      </g>
-                    )}
-                  </g>
-                )}
-              />
-            )}
-          </BarChart>
+            {hasTarget && <XAxis xAxisId="t" dataKey="label" hide />}
+            {hasTarget && <Bar xAxisId="t" dataKey="target" isAnimationActive={false} shape={<TargetTick />} />}
+          </ComposedChart>
         </ResponsiveContainer>
       </div>
     </div>
@@ -4935,74 +5106,304 @@ function VisitsPage({ visits, companies, projects, onAdd, onDelete, onOpenDetail
 /* 参考見積りページ                                                     */
 /* ------------------------------------------------------------------ */
 
-function ReferenceEstimatesPage({ referenceProjects, onPromote, onEdit, onDelete, onAdd }) {
-  const total = referenceProjects.reduce((a, p) => a + (Number(p.estimatedAmount) || 0), 0);
+// 受注月未定・参考見積りで使う案件カード（金額未記入は赤枠）
+function PendingProjectCard({ p, onOpenDetail, onSetMonth, onEdit, onDelete, onPromote }) {
+  const [month, setMonth] = useState("");
+  const ai = amountInfo(p);
+  const lastNote = (p.progressNotes || []).slice(-1)[0];
+  const red = missingFrame(p);
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-col gap-4 rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-        <div className="max-w-xl text-sm leading-relaxed text-slate-500">
-          まだ受注予定に組み込まれていない、社内検討用の参考見積りです。ここにある間は他の画面には表示されず、「本見積もりにする」を押すと案件として全体に反映されます。
+    <div className={`flex flex-col gap-3 rounded-[20px] bg-white p-4 shadow-sm ${red ? "border-2 border-rose-400" : "border border-slate-200"}`}>
+      <button onClick={() => onOpenDetail && onOpenDetail(p)} className="flex items-start justify-between gap-3 text-left">
+        <div className="min-w-0">
+          <div className="truncate text-[15px] font-semibold text-slate-900">{p.clientName}</div>
+          <div className="mt-0.5 truncate text-xs text-slate-500">{p.name}</div>
         </div>
-        <div className="flex shrink-0 items-center gap-4">
-          <div className="text-right">
-            <div className="text-[11px] text-slate-500">{referenceProjects.length}件の合計</div>
-            <div className="tabular-nums text-slate-900" style={{ ...NUM_FONT_STYLE, fontWeight: 500, fontSize: 24, lineHeight: 1.1 }}>
-              {Math.round(total / 10000).toLocaleString("ja-JP")}
-              <span className="ml-0.5 text-xs font-semibold">万円</span>
-            </div>
-          </div>
-          <button onClick={onAdd} className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
-            <Plus size={16} />
-            参考見積りを追加
-          </button>
+        <div className="shrink-0 text-right">
+          <div className={`tabular-nums text-slate-900 ${ai.cls}`} style={ai.cls ? undefined : { ...NUM_FONT_STYLE, fontWeight: 600, fontSize: 18 }}>{ai.text}</div>
+          {red && <div className="mt-0.5 text-[10px] text-rose-500">売上見込額を入力してください</div>}
+        </div>
+      </button>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {!p.isReference && <StatusBadge status={p.status} />}
+        <ConfidenceStars value={p.isReference ? 1 : p.confidence} />
+        <CategoryPill category={p.category} />
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${p.scheduledMonth ? "bg-indigo-50 text-indigo-700" : "bg-slate-100 text-slate-500"}`}>
+          {p.scheduledMonth ? monthLabel(p.scheduledMonth) : "受注月未定"}
+        </span>
+        {p.assignee && (
+          <span className="ml-auto flex items-center gap-1 text-xs text-slate-500"><Avatar name={p.assignee} size={18} />{p.assignee}</span>
+        )}
+      </div>
+      {lastNote && <div className="line-clamp-2 rounded-xl bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-500">{lastNote.text}</div>}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
+        <span className="text-[11px] text-slate-400">更新 {fmtDate(p.updatedAt)}</span>
+        <div className="flex items-center gap-1">
+          {!p.scheduledMonth && onSetMonth && (
+            <>
+              <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="w-[132px] rounded-lg border border-slate-200 px-2 py-1 text-xs" aria-label="受注月" />
+              <button disabled={!month} onClick={() => onSetMonth(p, month)} className="rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white disabled:bg-slate-200 disabled:text-slate-400">
+                受注月を設定
+              </button>
+            </>
+          )}
+          {onPromote && (
+            <button onClick={() => onPromote(p)} className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-700">本見積もりにする</button>
+          )}
+          {onEdit && <button onClick={() => onEdit(p)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700" title="編集"><Pencil size={14} /></button>}
+          {onDelete && <button onClick={() => onDelete(p)} className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500" title="削除"><Trash2 size={14} /></button>}
         </div>
       </div>
+    </div>
+  );
+}
 
-      {referenceProjects.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-400">
-          参考見積りはまだありません。「参考見積りを追加」から登録できます。
-        </div>
+function PendingSummary({ list, children }) {
+  const total = list.reduce((a, p) => a + (Number(p.status === "won" ? p.confirmedAmount : p.estimatedAmount) || 0), 0);
+  const missing = list.filter(missingFrame).length;
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      <StatTile label="件数" value={list.length} unit="件" />
+      <StatTile label="金額の合計" value={Math.round(total / 10000).toLocaleString("ja-JP")} unit="万円" tone="text-slate-900" />
+      <StatTile label="金額未記入" value={missing} unit="件" tone={missing ? "text-rose-600" : "text-slate-400"} sub={missing ? "赤枠の案件" : "なし"} />
+      {children}
+    </div>
+  );
+}
+
+// 受注月未定（進行中）：受注予定日が決まっていない案件
+function UndecidedPage({ projects, onOpenDetail, onSetMonth, onEdit, onDelete }) {
+  const [status, setStatus] = useState("all");
+  const opts = [
+    { key: "all", label: "全て" },
+    { key: "active", label: "進行中" },
+    { key: "won", label: "受注" },
+    { key: "lost", label: "ロスト" },
+  ];
+  const countOf = (k) => (k === "all" ? projects.length : projects.filter((p) => (k === "won" ? p.status === "won" || p.status === "delivered" : p.status === k)).length);
+  const list = projects
+    .filter((p) => status === "all" || (status === "won" ? p.status === "won" || p.status === "delivered" : p.status === status))
+    .sort((a, b) => Number(missingFrame(b)) - Number(missingFrame(a)) || (a.updatedAt < b.updatedAt ? 1 : -1));
+  return (
+    <div className="flex flex-col gap-5">
+      <PendingSummary list={list} />
+      <div className="flex flex-wrap gap-1.5 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm">
+        {opts.map((o) => (
+          <button key={o.key} onClick={() => setStatus(o.key)} className={`rounded-xl px-4 py-2 text-sm font-medium ${status === o.key ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-100"}`}>
+            {o.label} <span className="ml-0.5 text-xs opacity-70">{countOf(o.key)}</span>
+          </button>
+        ))}
+      </div>
+      {list.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-400">受注月が未定の案件はありません。</div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {referenceProjects.map((p) => (
-            <div key={p.id} className="flex flex-col gap-4 rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="truncate text-[15px] font-semibold text-slate-900">{p.name}</div>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
-                    <Avatar name={p.clientName} size={18} />
-                    <span className="truncate">{p.clientName}</span>
-                  </div>
-                </div>
-                <div className="flex shrink-0 gap-0.5">
-                  <button onClick={() => onEdit(p)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700" title="編集"><Pencil size={15} /></button>
-                  <button onClick={() => onDelete(p)} className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500" title="削除"><Trash2 size={15} /></button>
-                </div>
-              </div>
-              <div className="flex items-end justify-between gap-3">
-                <div>
-                  <div className="text-[11px] text-slate-500">見込み金額</div>
-                  <div className="tabular-nums text-slate-900" style={{ ...NUM_FONT_STYLE, fontWeight: 500, fontSize: 26, lineHeight: 1.1 }}>
-                    {Math.round((Number(p.estimatedAmount) || 0) / 10000).toLocaleString("ja-JP")}
-                    <span className="ml-0.5 text-xs font-semibold">万円</span>
-                  </div>
-                </div>
-                <div className="flex flex-col items-end gap-1.5">
-                  <CategoryPill category={p.category} />
-                  <ConfidenceStars value={p.confidence} />
-                </div>
-              </div>
-              <div className="flex items-center justify-between border-t border-slate-100 pt-3">
-                <span className="flex items-center gap-1.5 text-xs text-slate-500"><Avatar name={p.assignee} size={20} />担当 {p.assignee}</span>
-                <button onClick={() => onPromote(p)} className="rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-700">
-                  本見積もりにする
-                </button>
-              </div>
-            </div>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {list.map((p) => (
+            <PendingProjectCard key={p.id} p={p} onOpenDetail={onOpenDetail} onSetMonth={onSetMonth} onEdit={onEdit} onDelete={onDelete} />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+// 参考見積り（COOL）：全体／受注予定月／受注月未定 で切り替え
+function ReferenceEstimatesPage({ referenceProjects, onPromote, onEdit, onDelete, onAdd, onOpenDetail, onSetMonth }) {
+  const [tab, setTab] = useState("all");
+  const dated = referenceProjects.filter((p) => p.scheduledMonth);
+  const undecided = referenceProjects.filter((p) => !p.scheduledMonth);
+  const tabs = [
+    { key: "all", label: "参考見積り全体", list: referenceProjects },
+    { key: "dated", label: "受注予定月", list: dated },
+    { key: "undecided", label: "受注月未定", list: undecided },
+  ];
+  const cur = tabs.find((t) => t.key === tab);
+  const sorted = [...cur.list].sort((a, b) => Number(missingFrame(b)) - Number(missingFrame(a)) || String(a.scheduledMonth || "9999").localeCompare(String(b.scheduledMonth || "9999")));
+  const months = Array.from(new Set(dated.map((p) => p.scheduledMonth))).sort();
+  const card = (p) => <PendingProjectCard key={p.id} p={p} onOpenDetail={onOpenDetail} onSetMonth={onSetMonth} onEdit={onEdit} onDelete={onDelete} onPromote={onPromote} />;
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-3 rounded-[22px] border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+        <div className="max-w-xl text-sm leading-relaxed text-slate-500">
+          参考見積りはすべてCOOLとして扱い、受注予定月があるものは月別状況・ダッシュボードのCOOLに含めます。「本見積もりにする」で通常の案件になります。
+        </div>
+        <button onClick={onAdd} className="flex shrink-0 items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
+          <Plus size={16} />
+          参考見積りを追加
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-1.5 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm">
+        {tabs.map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)} className={`rounded-xl px-4 py-2 text-sm font-medium ${tab === t.key ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-100"}`}>
+            {t.label} <span className="ml-0.5 text-xs opacity-70">{t.list.length}</span>
+          </button>
+        ))}
+      </div>
+      <PendingSummary list={cur.list} />
+      {cur.list.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-400">該当する参考見積りはありません。</div>
+      ) : tab === "dated" ? (
+        months.map((m) => (
+          <div key={m} className="flex flex-col gap-3">
+            <div className="flex items-center gap-2 px-1 text-sm font-semibold text-slate-700">
+              {monthLabel(m)}
+              <span className="text-xs font-normal text-slate-400">{dated.filter((p) => p.scheduledMonth === m).length}件・{formatManYen(dated.filter((p) => p.scheduledMonth === m).reduce((a, p) => a + (Number(p.estimatedAmount) || 0), 0))}</span>
+              <span className="h-px flex-1 bg-slate-200" />
+            </div>
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">{dated.filter((p) => p.scheduledMonth === m).map(card)}</div>
+          </div>
+        ))
+      ) : (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">{sorted.map(card)}</div>
+      )}
+    </div>
+  );
+}
+
+// 売上計画（上期・下期）とアタックリストのCSVを読み込む
+function SalesImportModal({ open, onClose, onImport, projects, assignees }) {
+  const [files, setFiles] = useState([]);
+  const fyYear = Number(fiscalStart(currentMonthKey()).slice(0, 4));
+  async function handleFiles(e) {
+    const list = Array.from(e.target.files || []);
+    const out = [];
+    for (const f of list) {
+      try {
+        const text = await readCsvFile(f);
+        const parsed = parseSalesFile(text, fyYear);
+        out.push({ name: f.name, parsed, error: parsed ? "" : "売上計画・アタックリストのどちらの形式としても読み取れませんでした" });
+      } catch (err) {
+        out.push({ name: f.name, parsed: null, error: "読み込みに失敗しました" });
+      }
+    }
+    setFiles(out);
+  }
+  function close() {
+    setFiles([]);
+    onClose();
+  }
+  const { incoming, base, targets } = useMemo(() => {
+    const inc = [];
+    const b = {};
+    const t = {};
+    files.forEach(({ parsed }) => {
+      if (!parsed) return;
+      if (parsed.type === "plan") {
+        [...parsed.confirmed, ...parsed.hot].forEach((x) => inc.push(salesItemToProject(x, "plan")));
+        Object.assign(b, parsed.base);
+        Object.assign(t, parsed.targets);
+      } else parsed.items.forEach((x) => inc.push(salesItemToProject(x, "attack")));
+    });
+    return { incoming: inc, base: b, targets: t };
+  }, [files]);
+  const diff = useMemo(() => diffSalesProjects(projects, incoming), [projects, incoming]);
+  const newAssignees = Array.from(new Set(incoming.map((p) => p.assignee).filter((a) => a && !assignees.includes(a))));
+  const hasPlan = Object.keys(base).length + Object.keys(targets).length > 0;
+  const applyCount = diff.added.length + diff.changed.length;
+  const Line = ({ label, value, tone = "text-slate-800" }) => (
+    <div className="flex flex-col gap-0.5 py-1 text-xs sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+      <span className="shrink-0 text-slate-500">{label}</span>
+      <span className={`font-semibold tabular-nums sm:text-right ${tone}`}>{value}</span>
+    </div>
+  );
+
+  return (
+    <Modal open={open} onClose={close} title="売上計画・アタックリストを読み込む" width="max-w-2xl">
+      <p className="text-sm leading-relaxed text-slate-500">
+        読み込む担当は {ALLOWED_ASSIGNEES.join("・")} のみです。19期の売上計画（上期 8月〜1月・下期 2月〜7月）とアタックリストのCSVを、まとめて選べます。種類は中身から自動で判定し、前回と変わりのない案件は読み込みません。
+      </p>
+      <input
+        type="file"
+        accept=".csv"
+        multiple
+        onChange={handleFiles}
+        className="mt-4 block w-full text-sm text-slate-600 file:mr-3 file:rounded-lg file:border file:border-slate-200 file:bg-white file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-600 hover:file:bg-slate-50"
+      />
+      {files.length > 0 && (
+        <div className="mt-4 flex flex-col gap-3">
+          {files.map((f) => {
+            const p = f.parsed;
+            if (!p) return <div key={f.name} className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-600">{f.name}：{f.error}</div>;
+            if (p.type === "plan") {
+              const first = p.months[0];
+              const last = p.months[p.months.length - 1];
+              const reflected = p.confirmed.filter((x) => !x.amount).length;
+              const tVals = Array.from(new Set(Object.values(p.targets)));
+              return (
+                <div key={f.name} className="rounded-xl border border-slate-200 p-3">
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <span className="truncate text-sm font-semibold text-slate-800">{f.name}</span>
+                    <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">売上計画 {monthLabel(first)}〜{monthLabel(last).replace(/^\d{4}年/, "")}</span>
+                  </div>
+                  <Line label="月の目標金額" value={tVals.map((v) => formatManYen(v)).join("・") || "—"} />
+                  <Line label="制作基礎数字（確定金額に加算）" value={p.months.map((m) => `${Number(m.slice(5))}月 ${formatManYen(p.base[m] || 0)}`).join("／")} />
+                  <Line label="確定売上 → 受注" value={`${p.confirmed.length}件（うち月間売上反映済 ${reflected}件）`} tone="text-emerald-600" />
+                  <Line label="見積提出 未決定売上 → HOT" value={`${p.hot.length}件・${formatManYen(p.hot.reduce((a, x) => a + (x.amount || 0), 0))}`} tone="text-rose-600" />
+                  <Line label="運用・管理（ストック売上のため読み込まない）" value={`${p.skippedStock}件`} tone="text-slate-400" />
+                  <Line label="対象外の担当・担当が空欄（読み込まない）" value={`${p.skippedAssignee}件`} tone="text-slate-400" />
+                </div>
+              );
+            }
+            const it = p.items;
+            const cnt = (fn) => it.filter(fn).length;
+            return (
+              <div key={f.name} className="rounded-xl border border-slate-200 p-3">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <span className="truncate text-sm font-semibold text-slate-800">{f.name}</span>
+                  <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">アタックリスト → WARM</span>
+                </div>
+                <Line label="進行中（案件提案中）" value={`${cnt((x) => x.stage === "active")}件（うち受注月未定 ${cnt((x) => x.stage === "active" && !x.month)}件）`} tone="text-amber-600" />
+                <Line label="受注" value={`${cnt((x) => x.stage === "won")}件（うち受注月未定 ${cnt((x) => x.stage === "won" && !x.month)}件）`} tone="text-emerald-600" />
+                <Line label="ロスト" value={`${cnt((x) => x.stage === "lost")}件`} tone="text-rose-600" />
+                <Line label="参考見積 → 参考見積りページ（COOL）" value={`${cnt((x) => x.stage === "reference")}件（うち受注月未定 ${cnt((x) => x.stage === "reference" && !x.month)}件）`} tone="text-sky-600" />
+                <Line label="売上見込額が未記入（赤枠で表示）" value={`${cnt((x) => !x.amount)}件`} tone="text-rose-600" />
+                <div className="mt-1 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] leading-relaxed text-slate-500">
+                  読み込まない行：移動済 {p.skipped.moved}件・更新日が{fyYear}年8月より前 {p.skipped.old}件・受注予定／更新日／金額がすべて空欄 {p.skipped.empty}件・対象外のステージ（飛び込みなど）{p.skipped.stage}件・対象外の担当 {p.skipped.assignee}件
+                </div>
+              </div>
+            );
+          })}
+
+          {incoming.length > 0 && (
+            <div className="overflow-hidden rounded-xl border border-slate-200">
+              <div className="grid grid-cols-3 divide-x divide-slate-100 bg-slate-50 text-center">
+                <div className="px-2 py-2"><div className="text-[11px] text-slate-500">新規</div><div className="text-lg font-semibold text-indigo-600" style={NUM_FONT_STYLE}>{diff.added.length}<span className="text-xs font-normal text-slate-400">件</span></div></div>
+                <div className="px-2 py-2"><div className="text-[11px] text-slate-500">金額・内容の変更</div><div className="text-lg font-semibold text-amber-600" style={NUM_FONT_STYLE}>{diff.changed.length}<span className="text-xs font-normal text-slate-400">件</span></div></div>
+                <div className="px-2 py-2"><div className="text-[11px] text-slate-500">変更なし（読み込まない）</div><div className="text-lg font-semibold text-slate-400" style={NUM_FONT_STYLE}>{diff.unchanged.length}<span className="text-xs font-normal text-slate-400">件</span></div></div>
+              </div>
+              {diff.changed.length > 0 && (
+                <div className="max-h-40 overflow-y-auto border-t border-slate-100">
+                  {diff.changed.map(({ old, next }) => (
+                    <div key={old.id} className="flex items-center justify-between gap-3 border-b border-slate-100 px-3 py-1.5 text-xs last:border-b-0">
+                      <span className="min-w-0 truncate"><b className="text-slate-700">{next.clientName}</b> <span className="text-slate-500">{next.name}</span></span>
+                      <span className="shrink-0 tabular-nums text-slate-500">{amountInfo(old).text} → <b className="text-slate-800">{amountInfo(next).text}</b></span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {newAssignees.length > 0 && (
+            <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 p-2.5 text-xs text-indigo-700">
+              ツールにいない担当者を自動で追加します：{newAssignees.join("、")}
+            </div>
+          )}
+          <div className="text-[11px] leading-relaxed text-slate-400">
+            CSVにはセルの色が含まれないため、確定売上は金額があれば「受注」、金額が空欄なら「請求済（月間売上反映済）」として読み込みます。
+          </div>
+        </div>
+      )}
+      <div className="mt-6 flex justify-end gap-2">
+        <button onClick={close} className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">キャンセル</button>
+        <button
+          disabled={!files.length || (applyCount === 0 && !hasPlan)}
+          onClick={() => onImport({ diff, base, targets })}
+          className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+        >
+          {!files.length ? "反映する" : applyCount === 0 ? (hasPlan ? "目標・基礎数字だけ反映する" : "変更はありません") : `${applyCount}件を反映する`}
+        </button>
+      </div>
+    </Modal>
   );
 }
 
@@ -5425,20 +5826,26 @@ const PAGE_META = {
   monthlyRevenue: ["月別売上", "8月〜翌年7月を1期として、月ごとの確定金額と前月比・前年同月比を確認できます。"],
   companies: ["会社一覧", "取引先ごとの案件・受注率・訪問状況を確認できます。"],
   visits: ["訪問記録", "訪問の履歴を一覧とカレンダーで確認・登録できます。"],
-  reference: ["参考見積り", "受注予定に入れる前の、社内検討用の見積りです。"],
+  undecided: ["受注月未定（進行中）", "受注予定日が決まっていない案件です。受注月を設定すると月別の画面に反映されます。"],
+  reference: ["参考見積り", "参考見積り全体・受注予定月あり・受注月未定で切り替えて確認できます（すべてCOOL扱い）。"],
 };
 
 export default function App() {
   const [initialData] = useState(() => {
+    if (!USE_DEMO_SEED) return { projects: [], visits: [] };
     const seededProjects = [...seedProjects(), ...seedArchivedProjects(), ...seedReferenceEstimates()];
     return { projects: seededProjects, visits: seedVisits(seededProjects) };
   });
   const [projects, setProjects] = useState(initialData.projects);
   const [visits, setVisits] = useState(initialData.visits);
-  const [stocks, setStocks] = useState(() => seedStocks());
+  const [stocks, setStocks] = useState(() => (USE_DEMO_SEED ? seedStocks() : []));
   const [companyJump, setCompanyJump] = useState(null);
   const [monthlyScope, setMonthlyScope] = useState("all");
   const [monthlyNavOpen, setMonthlyNavOpen] = useState(false);
+  const [undecidedNavOpen, setUndecidedNavOpen] = useState(false);
+  const [baseRevenue, setBaseRevenue] = useState({}); // 制作基礎数字 { "2026-08": 円 }
+  const [monthTargets, setMonthTargets] = useState({}); // 売上計画の月ごとの目標 { "2026-08": 円 }
+  const [showSalesImport, setShowSalesImport] = useState(false);
   const [theme, setTheme] = useState(() => {
     const t = loadTheme();
     if (typeof document !== "undefined") document.documentElement.dataset.theme = t;
@@ -5481,7 +5888,7 @@ export default function App() {
   const [quoteTarget, setQuoteTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [detailId, setDetailId] = useState(null);
-  const [monthlyTarget, setMonthlyTargetState] = useState(3000000);
+  const [monthlyTarget, setMonthlyTargetState] = useState(15000000); // 月の目標のデフォルト：1,500万円
   const [showTargetEdit, setShowTargetEdit] = useState(false);
   projectsRef.current = projects;
   sourcesRef.current = sheetSources;
@@ -5497,7 +5904,12 @@ export default function App() {
 
   const visibleProjects = useMemo(() => projects.filter((p) => !p.isReference), [projects]);
   const referenceProjects = useMemo(() => projects.filter((p) => p.isReference), [projects]);
-  const boardProjects = useMemo(() => visibleProjects.filter((p) => !p.archived), [visibleProjects]);
+  // 受注予定月がある案件（受注月未定の案件は「受注月未定」ページだけに表示）
+  const datedProjects = useMemo(() => visibleProjects.filter((p) => p.scheduledMonth), [visibleProjects]);
+  const undecidedProjects = useMemo(() => visibleProjects.filter((p) => !p.scheduledMonth && !p.archived), [visibleProjects]);
+  const boardProjects = useMemo(() => datedProjects.filter((p) => !p.archived), [datedProjects]);
+  const baseOf = (m) => baseRevenue[m] || 0;
+  const targetFor = (m) => (monthTargets[m] !== undefined ? monthTargets[m] : monthlyTarget);
   const companyNames = useMemo(
     () => Array.from(new Set(visibleProjects.map((p) => p.clientName))).sort((a, b) => a.localeCompare(b, "ja")),
     [visibleProjects]
@@ -5794,6 +6206,7 @@ export default function App() {
       {
         id: uid(),
         ...form,
+        scheduledMonth: form.monthUndecided ? null : form.scheduledMonth || null,
         estimatedAmount: Number(form.estimatedAmount) || 0,
         confirmedAmount: null,
         status: "active",
@@ -5819,6 +6232,7 @@ export default function App() {
       {
         id: uid(),
         ...form,
+        scheduledMonth: form.monthUndecided ? null : form.scheduledMonth || null,
         estimatedAmount: Number(form.estimatedAmount) || 0,
         confirmedAmount: null,
         status: "active",
@@ -5848,8 +6262,25 @@ export default function App() {
     pushToast(`「${project.name}」を本見積もりにしました`);
   }
 
+  function setProjectMonth(project, month) {
+    updateProject(project.id, {
+      scheduledMonth: month,
+      history: [...(project.history || []), { id: uid(), date: todayIso(), type: "postponed", label: "受注月を設定", fromMonth: null, toMonth: month }],
+    });
+    pushToast(`「${project.clientName}」を${monthLabel(month)}に設定しました`);
+  }
+
+  function importSales({ diff, base, targets }) {
+    setProjects((list) => applySalesDiff(list, diff));
+    if (Object.keys(base).length) setBaseRevenue((b) => ({ ...b, ...base }));
+    if (Object.keys(targets).length) setMonthTargets((t) => ({ ...t, ...targets }));
+    pushToast(`CSVを反映しました（新規${diff.added.length}件・変更${diff.changed.length}件／変更なし${diff.unchanged.length}件は読み込みませんでした）`);
+    setShowSalesImport(false);
+  }
+
   function saveEditProject(form) {
-    updateProject(editing.id, { ...form, estimatedAmount: Number(form.estimatedAmount) || 0 });
+    const { monthUndecided, ...rest } = form;
+    updateProject(editing.id, { ...rest, scheduledMonth: monthUndecided ? null : rest.scheduledMonth || null, estimatedAmount: Number(form.estimatedAmount) || 0, amountMissing: !(Number(form.estimatedAmount) > 0) && editing.amountMissing });
     pushToast("案件を更新しました");
     setEditing(null);
   }
@@ -5863,12 +6294,57 @@ export default function App() {
     { key: "monthlyRevenue", label: "月別売上", icon: BarChart4 },
     { key: "companies", label: "会社一覧", icon: Building2 },
     { key: "visits", label: "訪問記録", icon: MapPin },
-    { key: "reference", label: "参考見積り", icon: FileText },
+    { key: "undecided", label: "受注月未定", icon: Clock3, sub: [{ key: "undecided", label: "進行中" }, { key: "reference", label: "参考見積り" }] },
   ];
 
   // サイドメニュー（月別状況は「全体／担当者」のサブメニューを開く）
   function renderNav(afterSelect) {
     return navItems.map((item) => {
+      if (item.sub) {
+        const groupActive = item.sub.some((x) => x.key === view);
+        const open = undecidedNavOpen;
+        const counts = { undecided: undecidedProjects.length, reference: referenceProjects.length };
+        return (
+          <div key={item.key}>
+            <button
+              onClick={() => {
+                setCompanyJump(null);
+                if (groupActive) setUndecidedNavOpen((v) => !v);
+                else {
+                  setView(item.sub[0].key);
+                  setUndecidedNavOpen(true);
+                  setMonthlyNavOpen(false);
+                }
+              }}
+              className={`app-nav flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium ${groupActive ? "is-active bg-indigo-50 text-indigo-700" : "text-slate-500 hover:bg-slate-50"}`}
+              aria-expanded={open}
+            >
+              <item.icon size={16} />
+              {item.label}
+              <ChevronDown size={14} className={`ml-auto transition-transform ${open ? "rotate-180" : ""}`} />
+            </button>
+            {open && (
+              <div className="ml-5 mt-1 flex flex-col gap-0.5 border-l border-slate-200 pl-2">
+                {item.sub.map((sub) => (
+                  <button
+                    key={sub.key}
+                    onClick={() => {
+                      setCompanyJump(null);
+                      setView(sub.key);
+                      afterSelect();
+                    }}
+                    className={`app-subnav flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] ${view === sub.key ? "is-active bg-slate-100 font-semibold text-slate-900" : "text-slate-500 hover:bg-slate-50"}`}
+                  >
+                    {sub.key === "undecided" ? <Clock3 size={14} /> : <FileText size={14} />}
+                    {sub.label}
+                    <span className="ml-auto text-[11px] tabular-nums text-slate-400">{counts[sub.key]}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      }
       const active = view === item.key;
       const isMonthly = item.key === "monthly";
       const expanded = isMonthly && monthlyNavOpen;
@@ -5884,6 +6360,7 @@ export default function App() {
                   setView("monthly");
                   setMonthlyScope("all");
                   setMonthlyNavOpen(true);
+                  setUndecidedNavOpen(false);
                 }
                 return; // サブメニューを選べるよう、モバイルでもメニューは閉じない
               }
@@ -6018,7 +6495,7 @@ export default function App() {
               参考見積り追加
             </button>
             <button
-              onClick={() => setShowImport(true)}
+              onClick={() => setShowSalesImport(true)}
               className="hidden items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 sm:flex"
             >
               <Upload size={16} />
@@ -6031,7 +6508,7 @@ export default function App() {
               <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
               シート連携{sheetSources.length > 0 ? `（${sheetSources.length}）` : ""}
             </button>
-            <HeaderMoreMenu onAddReference={() => setShowAddReference(true)} onImport={() => setShowImport(true)} onSheetSync={() => setShowSheetSync(true)} />
+            <HeaderMoreMenu onAddReference={() => setShowAddReference(true)} onImport={() => setShowSalesImport(true)} onSheetSync={() => setShowSheetSync(true)} />
             <button className="hidden rounded-lg p-2 text-slate-400 hover:bg-slate-100 sm:inline-flex"><Bell size={18} /></button>
             <button className="hidden rounded-lg p-2 text-slate-400 hover:bg-slate-100 sm:inline-flex"><Settings size={18} /></button>
             <div className="hidden h-8 w-8 rounded-full bg-indigo-100 text-center text-sm font-medium leading-8 text-indigo-700 sm:block">営</div>
@@ -6053,7 +6530,9 @@ export default function App() {
                     month={dashMonth}
                     projects={boardProjects}
                     stocks={stocks}
-                    target={monthlyTarget}
+                    target={targetFor(dashMonth)}
+                    baseOf={baseOf}
+                    refs={referenceProjects}
                     onEditTarget={() => setShowTargetEdit(true)}
                     onChangeMonth={(m) => {
                       setDashMonth(m);
@@ -6183,7 +6662,7 @@ export default function App() {
 
           {view === "monthly" && (
             <div className="mx-auto max-w-6xl">
-              <MonthlyPage projects={boardProjects} stocks={stocks} onOpenDetail={setDetail} monthlyTarget={monthlyTarget} assignees={assigneeNames} scope={monthlyScope} onScopeChange={setMonthlyScope} />
+              <MonthlyPage projects={boardProjects} stocks={stocks} onOpenDetail={setDetail} monthlyTarget={monthlyTarget} targetFor={targetFor} baseOf={baseOf} refs={referenceProjects} assignees={assigneeNames} scope={monthlyScope} onScopeChange={setMonthlyScope} />
             </div>
           )}
 
@@ -6195,13 +6674,13 @@ export default function App() {
 
           {view === "yearly" && (
             <div className="mx-auto max-w-6xl">
-              <YearlyRevenuePage projects={visibleProjects} />
+              <YearlyRevenuePage projects={datedProjects} />
             </div>
           )}
 
           {view === "monthlyRevenue" && (
             <div className="mx-auto max-w-6xl">
-              <MonthlyRevenuePage projects={visibleProjects} monthlyTarget={monthlyTarget} />
+              <MonthlyRevenuePage projects={datedProjects} monthlyTarget={monthlyTarget} targetFor={targetFor} stocks={stocks} baseOf={baseOf} />
             </div>
           )}
 
@@ -6244,7 +6723,15 @@ export default function App() {
                 onEdit={setEditing}
                 onDelete={setDeleteTarget}
                 onAdd={() => setShowAddReference(true)}
+                onOpenDetail={setDetail}
+                onSetMonth={setProjectMonth}
               />
+            </div>
+          )}
+
+          {view === "undecided" && (
+            <div className="mx-auto max-w-6xl">
+              <UndecidedPage projects={undecidedProjects} onOpenDetail={setDetail} onSetMonth={setProjectMonth} onEdit={setEditing} onDelete={setDeleteTarget} />
             </div>
           )}
         </main>
@@ -6277,12 +6764,14 @@ export default function App() {
         onToggleAuto={setAutoSync}
       />
       <ImportCsvModal open={showImport} onClose={() => setShowImport(false)} onImport={importFromCsv} existingKeys={existingCsvKeys} />
+      <SalesImportModal open={showSalesImport} onClose={() => setShowSalesImport(false)} onImport={importSales} projects={projects} assignees={assigneeNames} />
 
       <Modal open={showTargetEdit} onClose={() => setShowTargetEdit(false)} title="月間目標を設定" width="max-w-sm">
         <TargetForm
-          initial={monthlyTarget}
+          initial={targetFor(dashMonth)}
           onSubmit={(amount) => {
-            setMonthlyTargetState(amount);
+            if (monthTargets[dashMonth] !== undefined) setMonthTargets((t) => ({ ...t, [dashMonth]: amount }));
+            else setMonthlyTargetState(amount);
             pushToast("月間目標を更新しました");
             setShowTargetEdit(false);
           }}
