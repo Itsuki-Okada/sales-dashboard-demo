@@ -8,7 +8,7 @@ import {
   LayoutDashboard, BarChart3, CalendarDays, Star, Bell, Settings,
   Trash2, Pencil, CheckCircle2, XCircle, Clock3, ArrowRight,
   TrendingUp, TrendingDown, Building2, Truck, Menu, MapPin, FileCheck,
-  ArrowUpDown, Target, Link2, FileText, Upload, AlertTriangle, RefreshCw, Repeat,
+  ArrowUpDown, Target, Link2, FileText, Upload, AlertTriangle, RefreshCw, Repeat, BarChart4,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -537,7 +537,121 @@ function roundTo10k(n) {
   return Math.round(n / 10000) * 10000;
 }
 
-const STOCK_CATEGORIES = ["AI", "SNS", "保守管理", "サーバー・ドメイン", "その他"];
+const PROJECT_CAT_COLORS = { WEB: "#4f46e5", グラフィック: "#db2777", 動画: "#d97706", AI: "#0891b2", SNS: "#7c3aed", 未設定: "#94a3b8" };
+
+const STOCK_CATEGORIES = ["ドメイン・サーバー", "保守管理", "SNS運用", "WEB広告運用", "AI運用", "AIO運用"];
+// 区分の色（色覚の違いでも隣り合う色を見分けられるよう検証済み）
+const STOCK_COLORS = {
+  "ドメイン・サーバー": "#E5A52A",
+  保守管理: "#22A58F",
+  SNS運用: "#D9482B",
+  WEB広告運用: "#2BA0D6",
+  AI運用: "#5B54D6",
+  AIO運用: "#C25BC7",
+};
+
+/* ------------------------------------------------------------------ */
+/* 運用売上CSVの読み込み                                                  */
+/*  ・ドメイン・サーバー／保守管理：「月間平均」の金額を毎月のストックに      */
+/*  ・SNS運用／WEB広告運用／AI運用／AIO運用：6行目以降の各ブロックから        */
+/*    会社名（ブロック1列目）・プラン（2列目）・金額（3列目）を読み込む       */
+/*    例）SNS運用＝B・C・D列、WEB広告運用＝F・G・H列、AI運用＝J・K・L列、   */
+/*        AIO運用＝N・O・P列                                               */
+/* ------------------------------------------------------------------ */
+const UNYO_BLOCKS = ["SNS運用", "WEB広告運用", "AI運用", "AIO運用"];
+
+function parseUnyoCsv(text) {
+  const rows = parseCSVText(text);
+  const norm = (v) => String(v || "").replace(/\s+/g, "");
+  const cell = (r, c) => (rows[r] && rows[r][c] !== undefined ? String(rows[r][c]).trim() : "");
+  const thisMonth = currentMonthKey();
+  const fixed = [];
+  const items = [];
+  const csvTotals = {};
+  const warnings = [];
+
+  // 1) 月間平均（ドメイン・サーバー／保守管理）
+  const headerRow = rows.findIndex((r) => r.some((c) => norm(c).includes("ドメイン") || norm(c).startsWith("保守管理")));
+  rows.forEach((r, ri) => {
+    r.forEach((c, ci) => {
+      if (norm(c) !== "月間平均") return;
+      const amount = parseFlexibleNumber(cell(ri, ci + 1));
+      const head = headerRow >= 0 ? norm(cell(headerRow, ci)) : "";
+      const category = head.includes("ドメイン") || head.includes("サーバー") ? "ドメイン・サーバー" : head.includes("保守") ? "保守管理" : null;
+      if (category && amount > 0 && !fixed.some((f) => f.category === category)) fixed.push({ category, amount });
+    });
+  });
+  if (!fixed.some((f) => f.category === "ドメイン・サーバー")) warnings.push("ドメイン・サーバーの月間平均が見つかりませんでした");
+  if (!fixed.some((f) => f.category === "保守管理")) warnings.push("保守管理の月間平均が見つかりませんでした");
+
+  // 2) 各運用ブロック
+  const blockRow = rows.findIndex((r) => r.some((c) => UNYO_BLOCKS.includes(norm(c))));
+  if (blockRow === -1) {
+    warnings.push("「SNS運用」などの見出し行が見つかりませんでした");
+  } else {
+    const blocks = [];
+    rows[blockRow].forEach((c, ci) => {
+      const name = norm(c);
+      if (UNYO_BLOCKS.includes(name)) blocks.push({ category: name, col: ci });
+    });
+    // 見出し行（5行目）の次＝6行目以降を読む（空行は読み飛ばされるため見出し行を基準にする）
+    const startRow = blockRow + 1;
+    blocks.forEach(({ category, col }) => {
+      for (let r = startRow; r < rows.length; r++) {
+        const company = cell(r, col);
+        const plan = cell(r, col + 1);
+        const amountRaw = cell(r, col + 2);
+        if (norm(company) === "合計") {
+          csvTotals[category] = parseFlexibleNumber(amountRaw);
+          break;
+        }
+        if (!company || company === "／" || company === "/") continue;
+        const monthLabel = cell(r, 0);
+        const m = monthLabel.match(/(\d{4})\s*[年\/\-.]\s*(\d{1,2})/);
+        const startMonth = m ? `${m[1]}-${String(m[2]).padStart(2, "0")}` : thisMonth;
+        const cleanPlan = plan === "／" || plan === "/" ? "" : plan;
+        items.push({ category, clientName: company, plan: cleanPlan, amount: parseFlexibleNumber(amountRaw), startMonth });
+      }
+    });
+  }
+
+  const sums = {};
+  UNYO_BLOCKS.forEach((c) => (sums[c] = items.filter((x) => x.category === c).reduce((a, x) => a + x.amount, 0)));
+  return { fixed, items, csvTotals, sums, warnings };
+}
+
+// 読み込み結果をストック契約の形にする
+function unyoToStocks(parsed) {
+  const thisMonth = currentMonthKey();
+  const fixedStocks = parsed.fixed.map((f) => ({
+    id: uid(),
+    clientName: "全体（月間平均）",
+    name: `${f.category}（月間平均）`,
+    plan: "",
+    category: f.category,
+    monthlyAmount: Math.round(f.amount),
+    startMonth: thisMonth,
+    endMonth: null,
+    assignee: "",
+    memo: "運用売上CSVの月間平均",
+    importedFrom: "unyo-csv",
+  }));
+  const itemStocks = parsed.items.map((x) => ({
+    id: uid(),
+    clientName: x.clientName,
+    name: x.plan ? `${x.category}（${x.plan}）` : x.category,
+    plan: x.plan,
+    category: x.category,
+    monthlyAmount: x.amount,
+    startMonth: x.startMonth,
+    endMonth: null,
+    assignee: "",
+    memo: x.amount ? "運用売上CSVから読み込み" : "運用予定（運用売上CSV）",
+    planned: !x.amount,
+    importedFrom: "unyo-csv",
+  }));
+  return [...fixedStocks, ...itemStocks];
+}
 
 // ストック（月額）契約が指定月に有効か。
 function stockActiveIn(stock, month) {
@@ -547,16 +661,16 @@ function stockActiveIn(stock, month) {
 function seedStocks() {
   const start = (offset) => monthKeysRange(offset, offset)[0];
   return [
-    { clientName: "株式会社みらい工房", name: "AIチャットボット運用", category: "AI", monthlyAmount: 80000, startMonth: start(-8), assignee: "松本" },
-    { clientName: "株式会社スターゲイズ", name: "SNS運用代行（Instagram）", category: "SNS", monthlyAmount: 120000, startMonth: start(-10), assignee: "木村" },
+    { clientName: "株式会社みらい工房", name: "AIチャットボット運用", plan: "スタンダードプラン", category: "AI運用", monthlyAmount: 80000, startMonth: start(-8), assignee: "松本" },
+    { clientName: "株式会社スターゲイズ", name: "SNS運用代行（Instagram）", plan: "スタンダードプラン", category: "SNS運用", monthlyAmount: 120000, startMonth: start(-10), assignee: "木村" },
     { clientName: "株式会社ハーモニー音楽", name: "Webサイト保守管理", category: "保守管理", monthlyAmount: 30000, startMonth: start(-14), assignee: "林" },
-    { clientName: "有限会社あおぞら食品", name: "SNS運用代行（X）", category: "SNS", monthlyAmount: 70000, startMonth: start(-5), assignee: "清水" },
-    { clientName: "株式会社みらい工房", name: "サーバー・ドメイン管理", category: "サーバー・ドメイン", monthlyAmount: 12000, startMonth: start(-20), assignee: "松本" },
-    { clientName: "合同会社ノースライト", name: "AI議事録ツール利用料", category: "AI", monthlyAmount: 50000, startMonth: start(-3), assignee: "木村" },
+    { clientName: "有限会社あおぞら食品", name: "SNS運用代行（X）", plan: "ライトプラン", category: "SNS運用", monthlyAmount: 70000, startMonth: start(-5), assignee: "清水" },
+    { clientName: "株式会社みらい工房", name: "サーバー・ドメイン管理", category: "ドメイン・サーバー", monthlyAmount: 12000, startMonth: start(-20), assignee: "松本" },
+    { clientName: "合同会社ノースライト", name: "AIO対策（AI検索最適化）", plan: "ライトプラン", category: "AIO運用", monthlyAmount: 50000, startMonth: start(-3), assignee: "木村" },
     { clientName: "有限会社あおぞら食品", name: "Webサイト保守管理", category: "保守管理", monthlyAmount: 25000, startMonth: start(-12), assignee: "清水" },
-    { clientName: "株式会社スターゲイズ", name: "AI記事生成サポート", category: "AI", monthlyAmount: 60000, startMonth: start(-1), assignee: "林" },
-    { clientName: "合同会社ノースライト", name: "SNS運用代行（TikTok）", category: "SNS", monthlyAmount: 90000, startMonth: start(-9), endMonth: start(-1), assignee: "木村" },
-    { clientName: "株式会社ハーモニー音楽", name: "SNS運用代行（YouTube）", category: "SNS", monthlyAmount: 100000, startMonth: start(2), assignee: "松本" },
+    { clientName: "株式会社スターゲイズ", name: "リスティング広告運用", plan: "WEBサイト広告", category: "WEB広告運用", monthlyAmount: 60000, startMonth: start(-1), assignee: "林" },
+    { clientName: "合同会社ノースライト", name: "SNS運用代行（TikTok）", plan: "特別案内", category: "SNS運用", monthlyAmount: 90000, startMonth: start(-9), endMonth: start(-1), assignee: "木村" },
+    { clientName: "株式会社ハーモニー音楽", name: "SNS運用代行（YouTube）", plan: "戦略プラン", category: "SNS運用", monthlyAmount: 100000, startMonth: start(2), assignee: "松本" },
   ].map((x) => ({ id: uid(), endMonth: null, memo: "", ...x }));
 }
 
@@ -2151,6 +2265,98 @@ function YoyBadge({ yoy }) {
   );
 }
 
+function MonthlyRevenuePage({ projects }) {
+  const catColor = PROJECT_CAT_COLORS;
+  const curFy = fiscalStart(currentMonthKey());
+  const [fy, setFy] = useState(curFy);
+  const isConfirmed = (p) => p.status === "won" || p.status === "delivered";
+  const confirmedOf = (list) => list.filter(isConfirmed).reduce((a, p) => a + (Number(p.confirmedAmount) || 0), 0);
+  const monthValue = (m, c) => confirmedOf(projects.filter((p) => p.scheduledMonth === m && p.category === c));
+  const periods = fiscalPeriods(fy);
+  const thisMonth = currentMonthKey();
+  const rows = periods.map(({ key: m, isFuture }) => {
+    const list = projects.filter((p) => p.scheduledMonth === m);
+    const c = computeCounts(list);
+    const byCat = CATEGORIES.map((cat) => ({ cat, v: confirmedOf(list.filter((p) => p.category === cat)) })).filter((x) => x.v > 0);
+    const prevYear = `${Number(m.slice(0, 4)) - 1}${m.slice(4)}`;
+    const prevYearTotal = confirmedOf(projects.filter((p) => p.scheduledMonth === prevYear));
+    const yoy = !isFuture && prevYearTotal > 0 ? Math.round(((c.confirmedTotal - prevYearTotal) / prevYearTotal) * 1000) / 10 : null;
+    return { month: m, isFuture, ...c, byCat, yoy };
+  });
+  const maxRev = Math.max(1, ...rows.map((r) => r.confirmedTotal));
+  const fyOptions = [addMonths(curFy, -12), curFy];
+  const fyTotal = rows.reduce((a, r) => a + r.confirmedTotal, 0);
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-2 pl-4 shadow-sm">
+        <div className="text-sm text-slate-600">
+          表示する期 <span className="text-xs text-slate-400">（8月〜翌年7月で1期）</span>
+        </div>
+        <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1">
+          {fyOptions.map((k) => (
+            <button
+              key={k}
+              onClick={() => setFy(k)}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium ${fy === k ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-50"}`}
+            >
+              {k === curFy ? "今期" : "前期"}（{fiscalLabel(k)}）
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <StackedTrendCard
+        key={fy}
+        title={`月別の確定金額（${fiscalLabel(fy)}）`}
+        note="棒の上の数字は月の合計（万円）。受注・納品済みの確定金額を、受注予定月で集計しています。"
+        categories={CATEGORIES}
+        colors={catColor}
+        ranges={[{ key: fy, label: fiscalLabel(fy), periods }]}
+        valueOf={monthValue}
+        summary={({ sumFor, periods: ps, current }) => {
+          const prev = addMonths(current.key, -1);
+          const diff = sumFor(current.key) - sumFor(prev);
+          const toDate = ps.filter((p) => !p.isFuture).reduce((a, p) => a + sumFor(p.key), 0);
+          return [
+            { label: current.isNow ? "今月" : current.fullLabel, value: fmtMan(sumFor(current.key)) },
+            { label: "先月比", value: `${diff > 0 ? "+" : ""}${fmtMan(diff)}`, tone: diff > 0 ? "text-emerald-600" : diff < 0 ? "text-rose-600" : "text-slate-700" },
+            { label: fy === curFy ? "今期の累計" : "前期の合計", value: fmtMan(toDate) },
+          ];
+        }}
+      />
+
+      <SectionCard title={`月別サマリー（${fiscalLabel(fy)}）`} note={`期の合計 ${formatManYen(fyTotal)}・前年同月比は前年の同じ月との比較`}>
+        <div className="flex flex-col divide-y divide-slate-100">
+          {rows.map((r) => (
+            <div key={r.month} className={`flex flex-wrap items-center gap-x-4 gap-y-2 py-3 ${r.isFuture ? "opacity-60" : ""}`}>
+              <div className="flex w-32 shrink-0 items-center gap-1.5 whitespace-nowrap text-sm font-semibold text-slate-800">
+                {monthLabel(r.month).replace(/^\d{4}年/, "")}
+                <span className="text-[11px] font-normal text-slate-400">{r.month.slice(0, 4)}</span>
+                {r.month === thisMonth && <span className="rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-medium text-white">今月</span>}
+                {r.isFuture && <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">予定</span>}
+              </div>
+              <div className="flex min-w-[160px] flex-1 items-center gap-2">
+                <div className="flex h-2.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+                  {r.byCat.map((x) => (
+                    <div key={x.cat} title={`${x.cat} ${formatManYen(x.v)}`} style={{ width: `${(x.v / maxRev) * 100}%`, background: catColor[x.cat] }} />
+                  ))}
+                </div>
+                <span className="w-20 text-right text-sm font-semibold tabular-nums text-emerald-700">{formatManYen(r.confirmedTotal)}</span>
+              </div>
+              <div className="text-xs text-slate-500">
+                案件 <b className="text-slate-800">{r.total}</b>・受注 <b className="text-emerald-600">{r.won}</b>・ロスト <b className="text-rose-600">{r.lost}</b>
+              </div>
+              <RateBar won={r.won} lost={r.lost} rate={r.rate} width="120px" />
+              <div className="w-20 text-right"><YoyBadge yoy={r.yoy} /></div>
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
 function YearlyRevenuePage({ projects }) {
   const years = Array.from(new Set(projects.map((p) => yearOf(p.scheduledMonth)))).sort();
   const rows = years.map((y, i) => {
@@ -2164,7 +2370,11 @@ function YearlyRevenuePage({ projects }) {
   });
   const chartData = rows.map((r) => ({ 年: `${r.year}年`, 確定金額: Math.round(r.confirmedTotal / 10000) }));
   const maxRev = Math.max(1, ...rows.map((r) => r.confirmedTotal));
-  const catColor = { WEB: "#4f46e5", グラフィック: "#db2777", 動画: "#d97706", AI: "#0891b2", SNS: "#7c3aed", 未設定: "#94a3b8" };
+  const catColor = PROJECT_CAT_COLORS;
+  const thisYear = String(new Date().getFullYear());
+  const confirmedOf = (list) => list.filter((p) => p.status === "won" || p.status === "delivered").reduce((a, p) => a + (Number(p.confirmedAmount) || 0), 0);
+  const yearValue = (y, c) => confirmedOf(projects.filter((p) => yearOf(p.scheduledMonth) === y && p.category === c));
+  const yearPeriods = years.map((y) => ({ key: y, label: `${y}年`, fullLabel: `${y}年`, isNow: y === thisYear, isFuture: y > thisYear }));
   const axis = { fontSize: 12, fill: "#94A3B8" };
 
   return (
@@ -2203,17 +2413,26 @@ function YearlyRevenuePage({ projects }) {
         ))}
       </div>
 
-      <SectionCard title="年別の確定金額（万円）">
-        <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" strokeOpacity={0.6} />
-            <XAxis dataKey="年" tick={axis} axisLine={false} tickLine={false} />
-            <YAxis tick={axis} axisLine={false} tickLine={false} width={44} />
-            <Tooltip formatter={(v) => `${v.toLocaleString("ja-JP")}万円`} cursor={{ fill: "rgba(148,163,184,.12)" }} />
-            <Bar dataKey="確定金額" fill={chartAccent()} radius={[8, 8, 0, 0]} maxBarSize={90} />
-          </BarChart>
-        </ResponsiveContainer>
-      </SectionCard>
+      <StackedTrendCard
+        title="年別の確定金額"
+        note="棒の上の数字は年の合計（万円）。区分の札を押すと表示／非表示を切り替えられます。"
+        categories={CATEGORIES}
+        colors={catColor}
+        ranges={[{ key: "all", label: "全期間", periods: yearPeriods }]}
+        valueOf={yearValue}
+        nowLabel="今年"
+        summary={({ sumFor, periods, current }) => {
+          const idx = periods.findIndex((p) => p.key === current.key);
+          const prev = idx > 0 ? periods[idx - 1] : null;
+          const diff = prev ? sumFor(current.key) - sumFor(prev.key) : 0;
+          const totalAll = periods.reduce((a, p) => a + sumFor(p.key), 0);
+          return [
+            { label: `${current.label}`, value: fmtMan(sumFor(current.key)) },
+            { label: "前年比", value: prev ? `${diff > 0 ? "+" : ""}${fmtMan(diff)}` : "—", tone: diff > 0 ? "text-emerald-600" : diff < 0 ? "text-rose-600" : "text-slate-700" },
+            { label: "全期間の合計", value: fmtMan(totalAll) },
+          ];
+        }}
+      />
 
       <SectionCard title="年別サマリー">
         <div className="flex flex-col divide-y divide-slate-100">
@@ -3466,6 +3685,7 @@ function StockForm({ initial, companies, assignees, onSubmit, onCancel }) {
       clientName: "",
       name: "",
       category: STOCK_CATEGORIES[0],
+      plan: "",
       monthlyAmount: "",
       startMonth: currentMonthKey(),
       endMonth: "",
@@ -3474,7 +3694,7 @@ function StockForm({ initial, companies, assignees, onSubmit, onCancel }) {
     }
   );
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-  const valid = form.clientName.trim() && form.name.trim() && Number(form.monthlyAmount) > 0 && form.startMonth;
+  const valid = form.clientName.trim() && form.name.trim() && String(form.monthlyAmount) !== "" && Number(form.monthlyAmount) >= 0 && form.startMonth;
   const inputCls = "mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100";
   return (
     <div className="flex flex-col gap-4">
@@ -3486,6 +3706,13 @@ function StockForm({ initial, companies, assignees, onSubmit, onCancel }) {
       <div>
         <label className="text-xs font-medium text-slate-500">サービス名 *</label>
         <input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="例：SNS運用代行" className={inputCls} />
+      </div>
+      <div>
+        <label className="text-xs font-medium text-slate-500">プラン（任意）</label>
+        <input list="stock-plans" value={form.plan || ""} onChange={(e) => set("plan", e.target.value)} placeholder="例：スタンダードプラン" className={inputCls} />
+        <datalist id="stock-plans">
+          {["ライトプラン", "スタンダードプラン", "特別案内", "戦略プラン"].map((x) => <option key={x} value={x} />)}
+        </datalist>
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
@@ -3532,47 +3759,57 @@ function StockForm({ initial, companies, assignees, onSubmit, onCancel }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* ストック売上の推移グラフ（金額ラベル・区分の表示切替・アニメーション付き） */
+/* 積み上げ棒グラフの共通部品（ストック売上・年別売上・月別売上で共用）       */
+/*  ・棒の上に合計金額、現在の期間に「今月／今年」の札                       */
+/*  ・区分の札で表示／非表示を切り替え、上部に要約の数字                      */
+/*  ・マウスを乗せると内訳、表示時に下から積み上がるアニメーション             */
 /* ------------------------------------------------------------------ */
 
-function StockTrendChart({ stocks, catColors }) {
+function StackedTrendCard({
+  title,
+  note,
+  categories,
+  colors,
+  ranges, // [{ key, label, periods: [{ key, label, isNow, isFuture }] }]
+  defaultRangeKey,
+  valueOf, // (periodKey, category) => 円
+  nowLabel = "今月",
+  summary, // ({ sumFor, periods, current }) => [{ label, value, tone }]
+}) {
   const [hidden, setHidden] = useState([]);
   const narrow = useWindowWidth() < 640;
-  const [range, setRange] = useState(() => (typeof window !== "undefined" && window.innerWidth < 640 ? 6 : 12));
-  const thisMonth = currentMonthKey();
-  const keys = range === 12 ? monthKeysRange(-5, 6) : monthKeysRange(-2, 3);
-  const visibleCats = STOCK_CATEGORIES.filter((c) => !hidden.includes(c));
-  const sumFor = (m, cats) =>
-    stocks.filter((st) => cats.includes(st.category) && stockActiveIn(st, m)).reduce((a, st) => a + st.monthlyAmount, 0);
+  const [rangeKey, setRangeKey] = useState(() => {
+    if (typeof defaultRangeKey === "function") return defaultRangeKey(typeof window !== "undefined" && window.innerWidth < 640);
+    return defaultRangeKey || ranges[0].key;
+  });
+  const range = ranges.find((r) => r.key === rangeKey) || ranges[0];
+  const periods = range.periods;
+  const visibleCats = categories.filter((c) => !hidden.includes(c));
+  const sumFor = (pk, cats = visibleCats) => cats.reduce((a, c) => a + (valueOf(pk, c) || 0), 0);
 
-  const data = keys.map((m) => {
-    const row = { key: m, month: `${parseInt(m.slice(5), 10)}月`, isNow: m === thisMonth, isFuture: m > thisMonth };
-    STOCK_CATEGORIES.forEach((c) => {
-      row[c] = hidden.includes(c) ? 0 : sumFor(m, [c]) / 10000;
-    });
+  const data = periods.map((p) => {
+    const row = { ...p };
+    categories.forEach((c) => (row[c] = hidden.includes(c) ? 0 : (valueOf(p.key, c) || 0) / 10000));
     row.total = visibleCats.reduce((a, c) => a + row[c], 0);
     return row;
   });
-
-  const nowTotal = sumFor(thisMonth, visibleCats);
-  const prevTotal = sumFor(addMonths(thisMonth, -1), visibleCats);
-  const futureTotal = sumFor(addMonths(thisMonth, range === 12 ? 6 : 3), visibleCats);
-  const diff = nowTotal - prevTotal;
+  const current = periods.find((p) => p.isNow) || periods[periods.length - 1];
   const lastCat = [...visibleCats].reverse().find((c) => data.some((r) => r[c] > 0)) || visibleCats[visibleCats.length - 1];
   const fmt = (v) => (Math.round(v * 10) / 10).toLocaleString("ja-JP", { maximumFractionDigits: 1 });
   const toggle = (c) => setHidden((h) => (h.includes(c) ? h.filter((x) => x !== c) : [...h, c]));
-  const animKey = `${range}-${hidden.join(",")}`;
+  const crowded = narrow && periods.length > 6;
+  const tiles = summary ? summary({ sumFor, periods, current }) : [];
 
   function TotalLabel({ x, y, width, index }) {
     const row = data[index];
     if (!row || row.total <= 0) return null;
-    if (narrow && range === 12 && !row.isNow) return null; // スマホの12か月表示は今月だけ数字を出す（重なり防止）
+    if (crowded && !row.isNow) return null; // スマホで本数が多いときは現在の期間だけ数字を出す
     return (
       <g>
         {row.isNow && (
           <g transform={`translate(${x + width / 2}, ${y - 30})`}>
             <rect x={-18} y={-9} width={36} height={16} rx={8} fill="#4f46e5" />
-            <text x={0} y={3} textAnchor="middle" style={{ fontSize: 10, fontWeight: 700, fill: "#fff" }}>今月</text>
+            <text x={0} y={3} textAnchor="middle" style={{ fontSize: 10, fontWeight: 700, fill: "#fff" }}>{nowLabel}</text>
           </g>
         )}
         <text
@@ -3591,17 +3828,22 @@ function StockTrendChart({ stocks, catColors }) {
     if (!active || !payload || !payload.length) return null;
     const row = payload[0].payload;
     return (
-      <div className="min-w-[170px] rounded-xl border border-slate-200 bg-white p-3 text-xs shadow-lg">
+      <div className="min-w-[180px] rounded-xl border border-slate-200 bg-white p-3 text-xs shadow-lg">
         <div className="mb-1.5 flex items-center justify-between gap-3">
-          <span className="font-semibold text-slate-800">{monthLabel(row.key)}</span>
-          {row.isNow ? <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">今月</span> : row.isFuture ? <span className="text-[10px] text-slate-400">予定</span> : null}
+          <span className="font-semibold text-slate-800">{row.fullLabel || row.label}</span>
+          {row.isNow ? (
+            <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">{nowLabel}</span>
+          ) : row.isFuture ? (
+            <span className="text-[10px] text-slate-400">予定</span>
+          ) : null}
         </div>
         {visibleCats.filter((c) => row[c] > 0).map((c) => (
           <div key={c} className="flex items-center justify-between gap-4 py-0.5">
-            <span className="flex items-center gap-1.5 text-slate-600"><span className="inline-block h-2 w-2 rounded-sm" style={{ background: catColors[c] }} />{c}</span>
+            <span className="flex items-center gap-1.5 text-slate-600"><span className="inline-block h-2 w-2 rounded-sm" style={{ background: colors[c] }} />{c}</span>
             <span className="tabular-nums font-medium text-slate-800">{fmt(row[c])}万円</span>
           </div>
         ))}
+        {row.total === 0 && <div className="py-0.5 text-slate-400">この期間の金額はありません</div>}
         <div className="mt-1.5 flex items-center justify-between border-t border-slate-100 pt-1.5 font-semibold text-slate-900">
           <span>合計</span>
           <span className="tabular-nums">{fmt(row.total)}万円</span>
@@ -3614,43 +3856,38 @@ function StockTrendChart({ stocks, catColors }) {
     <div className="rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <div className="text-sm font-semibold text-slate-800">ストック売上の推移</div>
-          <div className="mt-0.5 text-xs text-slate-400">棒の上の数字は月の合計（万円）。今月より右は契約済みの予定です。</div>
+          <div className="text-sm font-semibold text-slate-800">{title}</div>
+          {note && <div className="mt-0.5 text-xs text-slate-400">{note}</div>}
         </div>
-        <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1">
-          {[[12, "12か月"], [6, "6か月"]].map(([v, lb]) => (
-            <button key={v} onClick={() => setRange(v)} className={`rounded-lg px-3 py-1 text-xs font-medium ${range === v ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-50"}`}>
-              {lb}
-            </button>
+        {ranges.length > 1 && (
+          <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1">
+            {ranges.map((r) => (
+              <button key={r.key} onClick={() => setRangeKey(r.key)} className={`rounded-lg px-3 py-1 text-xs font-medium ${rangeKey === r.key ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-50"}`}>
+                {r.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {tiles.length > 0 && (
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          {tiles.map((t) => (
+            <div key={t.label} className="rounded-2xl bg-slate-50 px-3 py-2.5">
+              <div className="text-[11px] text-slate-500">{t.label}</div>
+              <div className={`whitespace-nowrap tabular-nums ${t.tone || "text-slate-900"}`} style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: narrow ? 17 : 22, lineHeight: 1.2 }}>
+                {t.value}
+                <span className="ml-0.5 text-xs">万円</span>
+              </div>
+            </div>
           ))}
         </div>
-      </div>
-
-      <div className="mt-4 grid grid-cols-3 gap-2">
-        <div className="rounded-2xl bg-slate-50 px-3 py-2.5">
-          <div className="text-[11px] text-slate-500">今月</div>
-          <div className="tabular-nums text-slate-900" style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: 22, lineHeight: 1.2 }}>
-            {fmt(nowTotal / 10000)}<span className="ml-0.5 text-xs">万円</span>
-          </div>
-        </div>
-        <div className="rounded-2xl bg-slate-50 px-3 py-2.5">
-          <div className="text-[11px] text-slate-500">先月比</div>
-          <div className={`tabular-nums ${diff > 0 ? "text-emerald-600" : diff < 0 ? "text-rose-600" : "text-slate-700"}`} style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: 22, lineHeight: 1.2 }}>
-            {diff > 0 ? "+" : ""}{fmt(diff / 10000)}<span className="ml-0.5 text-xs">万円</span>
-          </div>
-        </div>
-        <div className="rounded-2xl bg-slate-50 px-3 py-2.5">
-          <div className="text-[11px] text-slate-500">{range === 12 ? "6" : "3"}か月後（予定）</div>
-          <div className="tabular-nums text-slate-900" style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: 22, lineHeight: 1.2 }}>
-            {fmt(futureTotal / 10000)}<span className="ml-0.5 text-xs">万円</span>
-          </div>
-        </div>
-      </div>
+      )}
 
       <div className="mt-4 flex flex-wrap gap-1.5">
-        {STOCK_CATEGORIES.map((c) => {
+        {categories.map((c) => {
           const off = hidden.includes(c);
-          const amt = sumFor(thisMonth, [c]);
+          const amt = valueOf(current.key, c) || 0;
           return (
             <button
               key={c}
@@ -3658,7 +3895,7 @@ function StockTrendChart({ stocks, catColors }) {
               className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${off ? "border-slate-200 text-slate-400" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
               title={off ? "クリックで表示" : "クリックで非表示"}
             >
-              <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: off ? "transparent" : catColors[c], border: `2px solid ${catColors[c]}` }} />
+              <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: off ? "transparent" : colors[c], border: `2px solid ${colors[c]}` }} />
               <span className={off ? "line-through" : ""}>{c}</span>
               <span className="tabular-nums text-slate-400">{fmt(amt / 10000)}万</span>
             </button>
@@ -3668,10 +3905,10 @@ function StockTrendChart({ stocks, catColors }) {
 
       <div className="mt-3 h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart key={animKey} data={data} margin={{ top: 40, right: 4, left: 0, bottom: 0 }} barCategoryGap="22%">
+          <BarChart key={`${rangeKey}-${hidden.join(",")}`} data={data} margin={{ top: 40, right: 4, left: 0, bottom: 0 }} barCategoryGap="22%">
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" strokeOpacity={0.6} />
             <XAxis
-              dataKey="month"
+              dataKey="label"
               axisLine={false}
               tickLine={false}
               interval={0}
@@ -3684,19 +3921,20 @@ function StockTrendChart({ stocks, catColors }) {
                 );
               }}
             />
-            <YAxis tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} width={34} />
+            <YAxis tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} width={40} />
             <Tooltip content={<TrendTooltip />} cursor={{ fill: "rgba(148,163,184,.12)", radius: 8 }} />
             {visibleCats.map((c, i) => (
               <Bar
                 key={c}
                 dataKey={c}
                 stackId="a"
-                fill={catColors[c]}
+                fill={colors[c]}
                 radius={c === lastCat ? [6, 6, 0, 0] : [0, 0, 0, 0]}
                 isAnimationActive
-                animationBegin={i * 140}
+                animationBegin={i * 120}
                 animationDuration={700}
                 animationEasing="ease-out"
+                maxBarSize={72}
               >
                 {data.map((row) => (
                   <Cell key={row.key} fillOpacity={row.isFuture ? 0.45 : 1} />
@@ -3711,29 +3949,204 @@ function StockTrendChart({ stocks, catColors }) {
   );
 }
 
-function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete }) {
+const fmtMan = (yen) => (Math.round((yen / 10000) * 10) / 10).toLocaleString("ja-JP", { maximumFractionDigits: 1 });
+
+// 期（8月〜翌年7月）の開始月 "YYYY-08" を返す
+function fiscalStart(monthKey) {
+  const y = Number(monthKey.slice(0, 4));
+  const m = Number(monthKey.slice(5, 7));
+  return `${m >= 8 ? y : y - 1}-08`;
+}
+function fiscalLabel(startKey) {
+  const y = Number(startKey.slice(0, 4));
+  return `${y}年8月〜${y + 1}年7月`;
+}
+// 期の12か月分の期間（8月〜翌年7月）
+function fiscalPeriods(startKey) {
+  const now = currentMonthKey();
+  return Array.from({ length: 12 }, (_, i) => addMonths(startKey, i)).map((m) => ({
+    key: m,
+    label: `${parseInt(m.slice(5), 10)}月`,
+    fullLabel: monthLabel(m),
+    isNow: m === now,
+    isFuture: m > now,
+  }));
+}
+
+function monthPeriods(fromOffset, toOffset) {
+  const now = currentMonthKey();
+  return monthKeysRange(fromOffset, toOffset).map((m) => ({
+    key: m,
+    label: `${parseInt(m.slice(5), 10)}月`,
+    fullLabel: monthLabel(m),
+    isNow: m === now,
+    isFuture: m > now,
+  }));
+}
+
+// ストック売上の推移
+function StockTrendChart({ stocks }) {
+  const valueOf = (m, c) => stocks.filter((st) => st.category === c && stockActiveIn(st, m)).reduce((a, st) => a + st.monthlyAmount, 0);
+  return (
+    <StackedTrendCard
+      title="ストック売上の推移"
+      note="期は8月〜翌年7月。棒の上の数字は月の合計（万円）、今月より右は契約済みの予定です。"
+      categories={STOCK_CATEGORIES}
+      colors={STOCK_COLORS}
+      ranges={(() => {
+        const cur = fiscalStart(currentMonthKey());
+        const prev = addMonths(cur, -12);
+        return [
+          { key: "this", label: `今期（${Number(cur.slice(0, 4))}年8月〜）`, periods: fiscalPeriods(cur) },
+          { key: "prev", label: "前期", periods: fiscalPeriods(prev) },
+          { key: "6", label: "直近6か月", periods: monthPeriods(-2, 3) },
+        ];
+      })()}
+      defaultRangeKey={(narrow) => (narrow ? "6" : "this")}
+      valueOf={valueOf}
+      summary={({ sumFor, periods, current }) => {
+        const prev = addMonths(current.key, -1);
+        const diff = sumFor(current.key) - sumFor(prev);
+        const fyTotal = periods.reduce((a, p) => a + sumFor(p.key), 0);
+        return [
+          { label: current.isNow ? "今月" : current.fullLabel, value: fmtMan(sumFor(current.key)) },
+          { label: "先月比", value: `${diff > 0 ? "+" : ""}${fmtMan(diff)}`, tone: diff > 0 ? "text-emerald-600" : diff < 0 ? "text-rose-600" : "text-slate-700" },
+          { label: "表示期間の合計（予定含む）", value: fmtMan(fyTotal) },
+        ];
+      }}
+    />
+  );
+}
+
+function UnyoImportModal({ open, onClose, onImport, existingCount }) {
+  const [fileName, setFileName] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [error, setError] = useState("");
+  const [replaceAll, setReplaceAll] = useState(false);
+
+  async function handleFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setFileName(file.name);
+    setError("");
+    setParsed(null);
+    try {
+      const text = await readCsvFile(file);
+      const r = parseUnyoCsv(text);
+      if (r.fixed.length === 0 && r.items.length === 0) setError("運用売上の形式として読み取れませんでした。CSVの内容をご確認ください。");
+      else setParsed(r);
+    } catch (err) {
+      console.error(err);
+      setError("CSVの読み込みに失敗しました。");
+    }
+  }
+  function close() {
+    setFileName("");
+    setParsed(null);
+    setError("");
+    onClose();
+  }
+  const rows = parsed
+    ? [
+        ...parsed.fixed.map((f) => ({ category: f.category, count: "月間平均", amount: f.amount, check: null })),
+        ...UNYO_BLOCKS.map((c) => ({
+          category: c,
+          count: (() => { const l = parsed.items.filter((x) => x.category === c); const pl = l.filter((x) => !x.amount).length; return `${l.length - pl}社${pl ? `＋運用予定${pl}` : ""}`; })(),
+          amount: parsed.sums[c] || 0,
+          check: parsed.csvTotals[c] !== undefined ? parsed.csvTotals[c] === parsed.sums[c] : null,
+          csvTotal: parsed.csvTotals[c],
+        })),
+      ]
+    : [];
+  const total = rows.reduce((a, r) => a + r.amount, 0);
+
+  return (
+    <Modal open={open} onClose={close} title="運用売上CSVを読み込む" width="max-w-xl">
+      <p className="text-sm leading-relaxed text-slate-500">
+        ドメイン・サーバーと保守管理は「月間平均」の金額を毎月のストックとして、SNS運用・WEB広告運用・AI運用・AIO運用は会社ごとに会社名・プラン・金額を読み込みます。
+      </p>
+      <input
+        type="file"
+        accept=".csv"
+        onChange={handleFile}
+        className="mt-4 block w-full text-sm text-slate-600 file:mr-3 file:rounded-lg file:border file:border-slate-200 file:bg-white file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-600 hover:file:bg-slate-50"
+      />
+      {error && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-600">{error}</div>}
+      {parsed && (
+        <div className="mt-4 flex flex-col gap-3">
+          <div className="text-xs text-slate-500">{fileName}</div>
+          <div className="overflow-hidden rounded-xl border border-slate-200">
+            {rows.map((r) => (
+              <div key={r.category} className="flex items-center justify-between gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-b-0">
+                <span className="flex items-center gap-2 font-medium text-slate-700">
+                  <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: STOCK_COLORS[r.category] }} />
+                  {r.category}
+                  <span className="text-xs font-normal text-slate-400">{r.count}</span>
+                </span>
+                <span className="flex items-center gap-2">
+                  <span className="tabular-nums font-semibold text-slate-800">{formatYen(r.amount)}<span className="text-[10px] font-normal text-slate-400">/月</span></span>
+                  {r.check === true && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">CSVの合計と一致</span>}
+                  {r.check === false && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">CSV合計 {formatYen(r.csvTotal)}</span>}
+                </span>
+              </div>
+            ))}
+            <div className="flex items-center justify-between bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-900">
+              <span>毎月のストック合計</span>
+              <span className="tabular-nums">{formatYen(total)}</span>
+            </div>
+          </div>
+          {parsed.items.some((x) => !x.amount) && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">
+              会社名はあるが金額が空欄の会社は「運用予定」として金額0で読み込み、一覧の一番下に表示します（{parsed.items.filter((x) => !x.amount).map((x) => x.clientName).join("、")}）。A列に「2027年4月」などの記載がある行は、その月から開始します。
+            </div>
+          )}
+          {parsed.warnings.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">{parsed.warnings.join(" / ")}</div>
+          )}
+          <label className="flex items-start gap-2 rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
+            <input type="checkbox" className="mt-0.5" checked={replaceAll} onChange={(e) => setReplaceAll(e.target.checked)} />
+            <span>今あるストックをすべて消して、このCSVの内容だけにする（サンプルや手入力したストックも削除されます）</span>
+          </label>
+          <div className="text-xs text-slate-400">
+            {replaceAll ? "読み込むと、ストックはこのCSVの内容だけになります。" : existingCount > 0
+              ? `前回このCSVから読み込んだ${existingCount}件は、今回の内容に置き換わります（手入力したストックはそのまま残ります）。`
+              : "読み込んだ内容は今月からのストックとして登録されます。"}
+          </div>
+        </div>
+      )}
+      <div className="mt-6 flex justify-end gap-2">
+        <button onClick={close} className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">キャンセル</button>
+        <button
+          disabled={!parsed}
+          onClick={() => onImport(unyoToStocks(parsed), replaceAll)}
+          className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+        >
+          {parsed ? `${parsed.fixed.length + parsed.items.length}件を読み込む` : "読み込む"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete, onImportUnyo }) {
   const [editing, setEditing] = useState(null); // null | "new" | stock
+  const [showUnyo, setShowUnyo] = useState(false);
   const [catFilter, setCatFilter] = useState("all");
   const thisMonth = currentMonthKey();
-  const activeNow = stocks.filter((st) => stockActiveIn(st, thisMonth));
+  const isPlanned = (st) => !!st.planned || Number(st.monthlyAmount) === 0;
+  const activeNow = stocks.filter((st) => stockActiveIn(st, thisMonth) && !isPlanned(st));
   const mrr = activeNow.reduce((a, st) => a + st.monthlyAmount, 0);
   const byCat = STOCK_CATEGORIES.map((c) => {
     const list = activeNow.filter((st) => st.category === c);
     return { category: c, count: list.length, amount: list.reduce((a, st) => a + st.monthlyAmount, 0) };
   }).filter((x) => x.count > 0);
-  const trend = monthKeysRange(-5, 6).map((m) => {
-    const row = { month: `${parseInt(m.slice(5), 10)}月` };
-    STOCK_CATEGORIES.forEach((c) => {
-      row[c] = stocks.filter((st) => st.category === c && stockActiveIn(st, m)).reduce((a, st) => a + st.monthlyAmount, 0) / 10000;
-    });
-    return row;
-  });
-  const catColors = { AI: "#6366f1", SNS: "#ec4899", 保守管理: "#10b981", "サーバー・ドメイン": "#f59e0b", その他: "#94a3b8" };
+  const catColors = STOCK_COLORS;
   const shown = stocks
     .filter((st) => catFilter === "all" || st.category === catFilter)
-    .sort((a, b) => Number(stockActiveIn(b, thisMonth)) - Number(stockActiveIn(a, thisMonth)) || b.monthlyAmount - a.monthlyAmount);
+    .sort((a, b) => Number(isPlanned(a)) - Number(isPlanned(b)) || Number(stockActiveIn(b, thisMonth)) - Number(stockActiveIn(a, thisMonth)) || b.monthlyAmount - a.monthlyAmount);
 
   function statusOf(st) {
+    if (isPlanned(st)) return { label: "運用予定", cls: "bg-amber-50 text-amber-700" };
     if (st.startMonth > thisMonth) return { label: "開始前", cls: "bg-sky-50 text-sky-700" };
     if (st.endMonth && st.endMonth < thisMonth) return { label: "終了", cls: "bg-slate-100 text-slate-500" };
     return { label: "継続中", cls: "bg-emerald-50 text-emerald-700" };
@@ -3773,7 +4186,7 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete }) 
         ))}
       </div>
 
-      <StockTrendChart stocks={stocks} catColors={catColors} />
+      <StockTrendChart stocks={stocks} />
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap gap-1.5">
@@ -3787,38 +4200,68 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete }) 
             </button>
           ))}
         </div>
-        <button onClick={() => setEditing("new")} className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-indigo-700">
-          <Plus size={16} />ストックを追加
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => setShowUnyo(true)} className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">
+            <Upload size={16} />運用売上CSVを読み込む
+          </button>
+          <button onClick={() => setEditing("new")} className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-indigo-700">
+            <Plus size={16} />ストックを追加
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-col gap-2">
-        {shown.map((st) => {
+        {shown.map((st, idx) => {
           const sts = statusOf(st);
+          const planned = isPlanned(st);
+          const firstPlanned = planned && (idx === 0 || !isPlanned(shown[idx - 1]));
           return (
-            <div key={st.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+            <React.Fragment key={st.id}>
+            {firstPlanned && (
+              <div className="mt-3 flex items-center gap-2 px-1 text-xs font-medium text-amber-700">
+                運用予定（金額0・{shown.filter(isPlanned).length}件）
+                <span className="h-px flex-1 bg-amber-200" />
+              </div>
+            )}
+            <div className={`flex items-center justify-between gap-3 rounded-xl border p-3.5 shadow-sm ${planned ? "border-dashed border-amber-200 bg-amber-50/30" : "border-slate-200 bg-white"}`}>
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="truncate text-sm font-medium text-slate-800">{st.name}</span>
+                  <span className="truncate text-sm font-semibold text-slate-900">{st.clientName}</span>
                   <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${sts.cls}`}>{sts.label}</span>
+                  {st.plan && <span className="rounded-full border border-slate-200 px-2 py-0.5 text-[11px] text-slate-600">{st.plan}</span>}
+
                 </div>
-                <div className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-slate-400">
-                  <span>{st.clientName}</span>
-                  <span>{st.category}</span>
-                  <span>{st.assignee}</span>
+                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-slate-400">
+                  <span className="flex items-center gap-1 text-slate-500">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: STOCK_COLORS[st.category] || "#94a3b8" }} />
+                    {st.category}
+                  </span>
+                  {!st.importedFrom && st.name && <span className="text-slate-500">{st.name}</span>}
+                  {st.assignee && <span>{st.assignee}</span>}
                   <span>{monthLabel(st.startMonth)}〜{st.endMonth ? monthLabel(st.endMonth) : ""}</span>
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <div className="pr-2 text-right text-sm font-semibold tabular-nums text-violet-700">{formatYen(st.monthlyAmount)}<span className="text-[10px] font-normal text-slate-400">/月</span></div>
+                <div className={`pr-2 text-right text-sm font-semibold tabular-nums ${planned ? "text-slate-400" : "text-violet-700"}`}>{formatYen(st.monthlyAmount)}<span className="text-[10px] font-normal text-slate-400">/月</span></div>
                 <button onClick={() => setEditing(st)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100"><Pencil size={15} /></button>
                 <button onClick={() => onDelete(st)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-rose-500"><Trash2 size={15} /></button>
               </div>
             </div>
+            </React.Fragment>
           );
         })}
         {shown.length === 0 && <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">該当するストックはありません</div>}
       </div>
+
+      <UnyoImportModal
+        open={showUnyo}
+        onClose={() => setShowUnyo(false)}
+        existingCount={stocks.filter((st) => st.importedFrom === "unyo-csv").length}
+        onImport={(list, replaceAll) => {
+          onImportUnyo && onImportUnyo(list, replaceAll);
+          setShowUnyo(false);
+        }}
+      />
 
       <Modal open={!!editing} onClose={() => setEditing(null)} title={editing === "new" ? "ストックを追加" : "ストックを編集"}>
         {editing && (
@@ -4822,6 +5265,7 @@ const PAGE_META = {
   monthly: ["月別状況", "月ごとの確定・見込み・ストックを確認し、カードから案件を開けます。"],
   stock: ["ストック売上", "AI・SNS・保守管理など、毎月入る売上の契約を管理します。"],
   yearly: ["年別売上", "年ごとの確定金額と前年比、カテゴリーの内訳を確認できます。"],
+  monthlyRevenue: ["月別売上", "8月〜翌年7月を1期として、月ごとの確定金額と前月比・前年同月比を確認できます。"],
   companies: ["会社一覧", "取引先ごとの案件・受注率・訪問状況を確認できます。"],
   visits: ["訪問記録", "訪問の履歴を一覧とカレンダーで確認・登録できます。"],
   reference: ["参考見積り", "受注予定に入れる前の、社内検討用の見積りです。"],
@@ -5165,6 +5609,10 @@ export default function App() {
     setStocks((l) => l.map((x) => (x.id === id ? { ...x, ...form } : x)));
     pushToast("ストックを更新しました");
   }
+  function importUnyoStocks(list, replaceAll = false) {
+    setStocks((l) => (replaceAll ? list : [...l.filter((x) => x.importedFrom !== "unyo-csv"), ...list]));
+    pushToast(`運用売上CSVから${list.length}件のストックを読み込みました`);
+  }
   function deleteStock(st) {
     setStocks((l) => l.filter((x) => x.id !== st.id));
     pushToast("ストックを削除しました");
@@ -5249,6 +5697,7 @@ export default function App() {
     { key: "monthly", label: "月別状況", icon: CalendarDays },
     { key: "stock", label: "ストック売上", icon: Repeat },
     { key: "yearly", label: "年別売上", icon: TrendingUp },
+    { key: "monthlyRevenue", label: "月別売上", icon: BarChart4 },
     { key: "companies", label: "会社一覧", icon: Building2 },
     { key: "visits", label: "訪問記録", icon: MapPin },
     { key: "reference", label: "参考見積り", icon: FileText },
@@ -5577,13 +6026,19 @@ export default function App() {
 
           {view === "stock" && (
             <div className="mx-auto max-w-6xl">
-              <StockPage stocks={stocks} companies={companyNames} assignees={assigneeNames} onAdd={addStock} onUpdate={updateStock} onDelete={deleteStock} />
+              <StockPage stocks={stocks} companies={companyNames} assignees={assigneeNames} onAdd={addStock} onUpdate={updateStock} onDelete={deleteStock} onImportUnyo={importUnyoStocks} />
             </div>
           )}
 
           {view === "yearly" && (
             <div className="mx-auto max-w-6xl">
               <YearlyRevenuePage projects={visibleProjects} />
+            </div>
+          )}
+
+          {view === "monthlyRevenue" && (
+            <div className="mx-auto max-w-6xl">
+              <MonthlyRevenuePage projects={visibleProjects} />
             </div>
           )}
 
