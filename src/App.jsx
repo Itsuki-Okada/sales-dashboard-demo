@@ -2849,113 +2849,177 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
     ["ストック", stock, "#7c3aed", "bg-violet-50 text-violet-600"],
   ];
 
+  // 直近6か月の確定金額（ミニ推移）
+  const trendMonths = Array.from({ length: 6 }, (_, i) => addMonths(month, i - 5));
+  const trend = trendMonths.map((m) => ({ m, v: computeCounts(projects.filter((p) => p.scheduledMonth === m)).confirmedTotal }));
+  const trendMax = Math.max(target, ...trend.map((t) => t.v), 1);
+  const forecast = c.confirmedTotal + hot + warm + cool;
+  const barBase = Math.max(target, forecast, 1);
+  const barPct = (v) => `${(v / barBase) * 100}%`;
+  const numStyle = (size, weight = 500) => ({ fontFamily: "var(--font-num)", fontWeight: weight, fontSize: size, lineHeight: 1.1 });
+
   return (
-    <div className="app-hero flex flex-col gap-5 rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 text-xs text-slate-500">
-            {isNow ? "今月の状況" : "月の状況"}
-            {isNow && <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] text-white">今月</span>}
-          </div>
-          <div className="mt-1 flex items-center gap-2">
-            <button
-              onClick={() => onChangeMonth(addMonths(month, -1))}
-              className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50"
-              aria-label="前の月"
-            >
-              <ChevronLeft size={18} />
-            </button>
-            <div className="flex items-baseline gap-1.5 px-1">
-              <span className="text-slate-900" style={{ ...NUM_FONT_STYLE, fontWeight: 300, fontSize: 52, lineHeight: 1, letterSpacing: "-.03em" }}>
-                {Number(month.slice(5))}
-              </span>
-              <span className="font-semibold text-slate-700">月</span>
-              <span className="ml-1 text-xs text-slate-400" style={NUM_FONT_STYLE}>{month.slice(0, 4)}</span>
+    <div className="app-hero flex h-full flex-col rounded-[22px] border border-slate-200 bg-white shadow-sm">
+      {/* 上段：月の切り替えと件数 */}
+      <div className="flex flex-col gap-4 p-5 pb-4 sm:p-6 sm:pb-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              {isNow ? "今月の状況" : "月の状況"}
+              {isNow && <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] text-white">今月</span>}
             </div>
-            <button
-              onClick={() => onChangeMonth(addMonths(month, 1))}
-              className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50"
-              aria-label="次の月"
-            >
-              <ChevronRight size={18} />
-            </button>
-            {!isNow && (
-              <button onClick={() => onChangeMonth(currentMonthKey())} className="ml-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-500 hover:bg-slate-50">
-                今月に戻る
+            <div className="mt-1 flex items-center gap-2">
+              <button onClick={() => onChangeMonth(addMonths(month, -1))} className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50" aria-label="前の月">
+                <ChevronLeft size={18} />
               </button>
-            )}
+              <div className="flex items-baseline gap-1.5 px-1">
+                <span className="text-slate-900" style={{ ...numStyle(52, 300), lineHeight: 1, letterSpacing: "-.03em" }}>{Number(month.slice(5))}</span>
+                <span className="font-semibold text-slate-700">月</span>
+                <span className="ml-1 text-xs text-slate-400" style={{ fontFamily: "var(--font-num)" }}>{month.slice(0, 4)}</span>
+              </div>
+              <button onClick={() => onChangeMonth(addMonths(month, 1))} className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50" aria-label="次の月">
+                <ChevronRight size={18} />
+              </button>
+              {!isNow && (
+                <button onClick={() => onChangeMonth(currentMonthKey())} className="ml-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-500 hover:bg-slate-50">
+                  今月に戻る
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="grid grid-cols-5 divide-x divide-slate-100 rounded-2xl border border-slate-100 bg-slate-50/60 text-center">
+            {[
+              ["案件", c.total, "text-slate-800"],
+              ["受注", c.won, "text-emerald-600"],
+              ["ロスト", c.lost, "text-rose-600"],
+              ["時期変更", postponed, "text-amber-600"],
+              ["受注率", c.rate === null ? "—" : `${c.rate}%`, "text-indigo-600"],
+            ].map(([lb, v, cls]) => (
+              <div key={lb} className="px-3 py-2 sm:px-4">
+                <div className="whitespace-nowrap text-[10px] text-slate-500">{lb}</div>
+                <div className={`tabular-nums ${cls}`} style={numStyle(22)}>{v}</div>
+              </div>
+            ))}
           </div>
         </div>
-        <div className="flex flex-wrap gap-5 text-center">
-          {[
-            ["案件", c.total, "text-slate-800"],
-            ["受注", c.won, "text-emerald-600"],
-            ["ロスト", c.lost, "text-rose-600"],
-            ["時期変更", postponed, "text-amber-600"],
-            ["受注率", c.rate === null ? "—" : `${c.rate}%`, "text-indigo-600"],
-          ].map(([lb, v, cls]) => (
-            <div key={lb}>
-              <div className="text-[11px] text-slate-500">{lb}</div>
-              <div className={`tabular-nums ${cls}`} style={{ ...NUM_FONT_STYLE, fontWeight: 500, fontSize: 24, lineHeight: 1.15 }}>{v}</div>
-            </div>
+        <div className="flex flex-wrap gap-1.5">
+          {monthChoices.map((m) => (
+            <button
+              key={m}
+              onClick={() => onChangeMonth(m)}
+              className={`rounded-full px-3 py-1 text-xs font-medium ${m === month ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-500 hover:bg-slate-50"}`}
+            >
+              {monthLabel(m)}
+            </button>
           ))}
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
-        {monthChoices.map((m) => (
-          <button
-            key={m}
-            onClick={() => onChangeMonth(m)}
-            className={`rounded-full px-3 py-1 text-xs font-medium ${m === month ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-500 hover:bg-slate-50"}`}
-          >
-            {monthLabel(m)}
+      {/* 中段：目標達成のリングと内訳 */}
+      <div className="flex flex-1 flex-col items-center gap-6 border-t border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:px-6">
+        <div className="flex shrink-0 flex-col items-center">
+          <svg width="176" height="176" viewBox="0 0 150 150">
+            <g transform="rotate(-90 75 75)">
+              <circle cx="75" cy="75" r={R} fill="none" style={{ stroke: "var(--c-track)" }} strokeWidth="12" />
+              {segs}
+            </g>
+            <text x="75" y="72" textAnchor="middle" style={{ ...numStyle(32), fill: "var(--c-ink)" }}>{pct}%</text>
+            <text x="75" y="93" textAnchor="middle" style={{ fontSize: 10.5, fill: "var(--c-muted)" }}>確定の目標達成率</text>
+          </svg>
+          <button onClick={onEditTarget} className="mt-1 flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-50">
+            <Target size={13} />
+            目標 {formatManYen(target)} を編集
           </button>
-        ))}
-      </div>
+        </div>
 
-      <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-center">
-        <svg width="150" height="150" viewBox="0 0 150 150" className="shrink-0">
-          <g transform="rotate(-90 75 75)">
-            <circle cx="75" cy="75" r={R} fill="none" style={{ stroke: "var(--c-track)" }} strokeWidth="12" />
-            {segs}
-          </g>
-          <text x="75" y="74" textAnchor="middle" style={{ ...NUM_FONT_STYLE, fontSize: 30, fontWeight: 500, fill: "var(--c-ink)" }}>{pct}%</text>
-          <text x="75" y="95" textAnchor="middle" style={{ fontSize: 11, fill: "var(--c-muted)" }}>確定の目標達成率</text>
-        </svg>
-        <div className="flex w-full min-w-0 flex-col gap-3">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-            <span className="text-sm text-slate-600">
-              確定
-              <b className="mx-1 tabular-nums text-emerald-700" style={{ ...NUM_FONT_STYLE, fontWeight: 600, fontSize: 24 }}>{manN(c.confirmedTotal)}</b>
-              <span className="text-xs">万円</span>
-              <span className="text-slate-400"> / 目標 {formatManYen(target)}</span>
-            </span>
-            <span className="flex items-center gap-3">
-              <span className={`text-sm font-semibold ${remain <= 0 ? "text-emerald-600" : "text-indigo-700"}`}>
-                {target <= 0 ? "目標未設定" : remain <= 0 ? "目標達成" : `あと ${formatManYen(remain)}`}
-              </span>
-              <button onClick={onEditTarget} className="flex items-center gap-1 text-xs font-medium text-indigo-600 hover:underline">
-                <Target size={13} />
-                目標を編集
-              </button>
-            </span>
+        <div className="flex w-full min-w-0 flex-col gap-4">
+          <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
+            <div>
+              <div className="text-xs text-slate-500">確定金額</div>
+              <div className="tabular-nums text-emerald-700" style={numStyle(34, 600)}>
+                {manN(c.confirmedTotal)}
+                <span className="ml-1 text-sm font-semibold">万円</span>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-slate-500">目標まで</div>
+              <div className={`tabular-nums ${remain <= 0 ? "text-emerald-600" : "text-indigo-700"}`} style={numStyle(22, 600)}>
+                {target <= 0 ? "—" : remain <= 0 ? "達成" : <>あと {manN(remain)}<span className="ml-0.5 text-xs font-semibold">万円</span></>}
+              </div>
+            </div>
           </div>
-          <div className="grid grid-cols-2 gap-2">
+
+          {/* 確定＋見込みの積み上げバー（縦線が目標） */}
+          <div>
+            <div className="relative h-3 overflow-visible rounded-full" style={{ background: "var(--c-track)" }}>
+              <div className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full" style={{ width: barPct(forecast) }}>
+                {[[c.confirmedTotal, "#059669", 1], [hot, "#e11d48", 0.6], [warm, "#d97706", 0.6], [cool, "#0284c7", 0.6]]
+                  .filter((x) => x[0] > 0)
+                  .map(([v, col, op], i) => (
+                    <div key={i} style={{ flexGrow: v, flexBasis: 0, background: col, opacity: op }} />
+                  ))}
+              </div>
+              {target > 0 && <div className="absolute -inset-y-1 w-0.5 rounded bg-slate-800" style={{ left: barPct(target) }} title={`目標 ${formatManYen(target)}`} />}
+            </div>
+            <div className="mt-1.5 flex justify-between text-[11px] text-slate-400">
+              <span>確定＋見込み {formatManYen(forecast)}</span>
+              <span>│ 目標 {formatManYen(target)}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5">
             {tiles.map(([lb, v, dot, cls]) => (
-              <div key={lb} className={`rounded-2xl px-3 py-2.5 ${cls}`}>
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+              <div key={lb} className={`flex items-center justify-between rounded-2xl px-4 py-3 ${cls}`}>
+                <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
                   <span className="inline-block h-2 w-2 rounded-full" style={{ background: dot }} />
                   {lb}
                 </div>
-                <div className="tabular-nums" style={{ ...NUM_FONT_STYLE, fontWeight: 500, fontSize: 22, lineHeight: 1.2, opacity: v === 0 ? 0.45 : 1 }}>
+                <div className="tabular-nums" style={{ ...numStyle(22), opacity: v === 0 ? 0.45 : 1 }}>
                   {manN(v)}
                   <span className="ml-0.5 text-[11px] font-semibold">万円</span>
                 </div>
               </div>
             ))}
           </div>
-          <div className="text-[11px] text-slate-400">見込み金額（HOT＋WARM＋COOL）{formatManYen(hot + warm + cool)}</div>
+        </div>
+      </div>
+
+      {/* 下段：直近6か月の確定金額 */}
+      <div className="border-t border-slate-100 px-5 py-4 sm:px-6">
+        <div className="mb-2 flex items-baseline justify-between">
+          <span className="text-xs font-medium text-slate-500">直近6か月の確定金額</span>
+          <span className="text-[11px] text-slate-400">点線は月間目標</span>
+        </div>
+        <div className="relative flex h-16 items-end gap-2">
+          {target > 0 && (
+            <div className="absolute inset-x-0 border-t border-dashed border-slate-300" style={{ bottom: `${(target / trendMax) * 100}%` }} />
+          )}
+          {trend.map((t) => {
+            const cur = t.m === month;
+            return (
+              <button
+                key={t.m}
+                onClick={() => onChangeMonth(t.m)}
+                className="group relative flex h-full flex-1 flex-col justify-end"
+                title={`${monthLabel(t.m)} 確定 ${formatManYen(t.v)}`}
+              >
+                <span className={`mb-0.5 text-center text-[10px] tabular-nums ${cur ? "font-semibold text-slate-800" : "text-slate-400 opacity-0 group-hover:opacity-100"}`}>
+                  {manN(t.v)}
+                </span>
+                <span
+                  className="block w-full rounded-t-md transition-all"
+                  style={{ height: `${Math.max(3, (t.v / trendMax) * 100)}%`, background: cur ? "#059669" : "var(--c-track)", minHeight: 3 }}
+                />
+              </button>
+            );
+          })}
+        </div>
+        <div className="mt-1 flex gap-2">
+          {trend.map((t) => (
+            <span key={t.m} className={`flex-1 text-center text-[11px] ${t.m === month ? "font-semibold text-slate-800" : "text-slate-400"}`}>
+              {Number(t.m.slice(5))}月
+            </span>
+          ))}
         </div>
       </div>
     </div>
@@ -5372,7 +5436,7 @@ export default function App() {
           {view === "dashboard" && (
             <div className="mx-auto flex max-w-6xl flex-col gap-5">
               <div className="grid gap-5 lg:grid-cols-3">
-                <div className="min-w-0 lg:col-span-2">
+                <div className="min-w-0 lg:col-span-2 lg:h-full">
                   <DashboardHero
                     month={dashMonth}
                     projects={boardProjects}
@@ -5393,7 +5457,7 @@ export default function App() {
                     onOpenDetail={setDetail}
                     onGoToVisits={() => setView("visits")}
                   />
-                  <div className="rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="flex-1 rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
                     <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800">注目案件 <ConfidenceStars value={3} /><span className="font-normal text-slate-400">{Number(dashMonth.slice(5))}月</span></div>
                     <div className="flex flex-col gap-2.5">
                       {spotlight.length === 0 && <div className="text-sm text-slate-400">この月の注目案件はありません</div>}
