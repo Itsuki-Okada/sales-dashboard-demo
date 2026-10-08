@@ -3312,6 +3312,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
     ["HOT", hot, "#e11d48", "bg-rose-50 text-rose-600"],
     ["WARM", warm, "#d97706", "bg-amber-50 text-amber-600"],
     ["COOL", cool, "#0284c7", "bg-sky-50 text-sky-600"],
+    ["ストック", stock, "#7c3aed", "bg-violet-50 text-violet-600"],
 
   ];
 
@@ -3438,7 +3439,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-2 gap-2.5">
             {tiles.map(([lb, v, dot, cls]) => (
               <div key={lb} className={`flex items-center justify-between rounded-2xl px-4 py-3 ${cls}`}>
                 <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
@@ -3929,7 +3930,7 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
               </span>
             </div>
             <div className="flex flex-col gap-1">
-              {LIST.filter((it) => ["projConfirmed", "baseAmt", "stock"].includes(it.key)).map(renderLine)}
+              {["projConfirmed", "baseAmt", "stock"].map((k) => LIST.find((it) => it.key === k)).map(renderLine)}
             </div>
           </div>
           <div className="rounded-2xl border border-slate-200 p-1.5">
