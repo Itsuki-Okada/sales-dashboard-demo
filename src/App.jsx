@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Legend,
+  Tooltip, ResponsiveContainer, Legend, Cell, LabelList,
 } from "recharts";
 import {
   Search, Plus, MoreHorizontal, ChevronDown, ChevronRight, ChevronLeft, X,
@@ -3394,6 +3394,186 @@ function StockForm({ initial, companies, assignees, onSubmit, onCancel }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* ストック売上の推移グラフ（金額ラベル・区分の表示切替・アニメーション付き） */
+/* ------------------------------------------------------------------ */
+
+function StockTrendChart({ stocks, catColors }) {
+  const [hidden, setHidden] = useState([]);
+  const narrow = useWindowWidth() < 640;
+  const [range, setRange] = useState(() => (typeof window !== "undefined" && window.innerWidth < 640 ? 6 : 12));
+  const thisMonth = currentMonthKey();
+  const keys = range === 12 ? monthKeysRange(-5, 6) : monthKeysRange(-2, 3);
+  const visibleCats = STOCK_CATEGORIES.filter((c) => !hidden.includes(c));
+  const sumFor = (m, cats) =>
+    stocks.filter((st) => cats.includes(st.category) && stockActiveIn(st, m)).reduce((a, st) => a + st.monthlyAmount, 0);
+
+  const data = keys.map((m) => {
+    const row = { key: m, month: `${parseInt(m.slice(5), 10)}月`, isNow: m === thisMonth, isFuture: m > thisMonth };
+    STOCK_CATEGORIES.forEach((c) => {
+      row[c] = hidden.includes(c) ? 0 : sumFor(m, [c]) / 10000;
+    });
+    row.total = visibleCats.reduce((a, c) => a + row[c], 0);
+    return row;
+  });
+
+  const nowTotal = sumFor(thisMonth, visibleCats);
+  const prevTotal = sumFor(addMonths(thisMonth, -1), visibleCats);
+  const futureTotal = sumFor(addMonths(thisMonth, range === 12 ? 6 : 3), visibleCats);
+  const diff = nowTotal - prevTotal;
+  const lastCat = [...visibleCats].reverse().find((c) => data.some((r) => r[c] > 0)) || visibleCats[visibleCats.length - 1];
+  const fmt = (v) => (Math.round(v * 10) / 10).toLocaleString("ja-JP", { maximumFractionDigits: 1 });
+  const toggle = (c) => setHidden((h) => (h.includes(c) ? h.filter((x) => x !== c) : [...h, c]));
+  const animKey = `${range}-${hidden.join(",")}`;
+
+  function TotalLabel({ x, y, width, index }) {
+    const row = data[index];
+    if (!row || row.total <= 0) return null;
+    if (narrow && range === 12 && !row.isNow) return null; // スマホの12か月表示は今月だけ数字を出す（重なり防止）
+    return (
+      <g>
+        {row.isNow && (
+          <g transform={`translate(${x + width / 2}, ${y - 30})`}>
+            <rect x={-18} y={-9} width={36} height={16} rx={8} fill="#4f46e5" />
+            <text x={0} y={3} textAnchor="middle" style={{ fontSize: 10, fontWeight: 700, fill: "#fff" }}>今月</text>
+          </g>
+        )}
+        <text
+          x={x + width / 2}
+          y={y - 8}
+          textAnchor="middle"
+          style={{ fontSize: narrow ? (row.isNow ? 12 : 10) : row.isNow ? 13 : 11, fontWeight: row.isNow ? 700 : 600, fill: "var(--c-ink)", fontFamily: "var(--font-num)" }}
+        >
+          {fmt(row.total)}
+        </text>
+      </g>
+    );
+  }
+
+  function TrendTooltip({ active, payload }) {
+    if (!active || !payload || !payload.length) return null;
+    const row = payload[0].payload;
+    return (
+      <div className="min-w-[170px] rounded-xl border border-slate-200 bg-white p-3 text-xs shadow-lg">
+        <div className="mb-1.5 flex items-center justify-between gap-3">
+          <span className="font-semibold text-slate-800">{monthLabel(row.key)}</span>
+          {row.isNow ? <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">今月</span> : row.isFuture ? <span className="text-[10px] text-slate-400">予定</span> : null}
+        </div>
+        {visibleCats.filter((c) => row[c] > 0).map((c) => (
+          <div key={c} className="flex items-center justify-between gap-4 py-0.5">
+            <span className="flex items-center gap-1.5 text-slate-600"><span className="inline-block h-2 w-2 rounded-sm" style={{ background: catColors[c] }} />{c}</span>
+            <span className="tabular-nums font-medium text-slate-800">{fmt(row[c])}万円</span>
+          </div>
+        ))}
+        <div className="mt-1.5 flex items-center justify-between border-t border-slate-100 pt-1.5 font-semibold text-slate-900">
+          <span>合計</span>
+          <span className="tabular-nums">{fmt(row.total)}万円</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="text-sm font-semibold text-slate-800">ストック売上の推移</div>
+          <div className="mt-0.5 text-xs text-slate-400">棒の上の数字は月の合計（万円）。今月より右は契約済みの予定です。</div>
+        </div>
+        <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1">
+          {[[12, "12か月"], [6, "6か月"]].map(([v, lb]) => (
+            <button key={v} onClick={() => setRange(v)} className={`rounded-lg px-3 py-1 text-xs font-medium ${range === v ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-50"}`}>
+              {lb}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-3 gap-2">
+        <div className="rounded-2xl bg-slate-50 px-3 py-2.5">
+          <div className="text-[11px] text-slate-500">今月</div>
+          <div className="tabular-nums text-slate-900" style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: 22, lineHeight: 1.2 }}>
+            {fmt(nowTotal / 10000)}<span className="ml-0.5 text-xs">万円</span>
+          </div>
+        </div>
+        <div className="rounded-2xl bg-slate-50 px-3 py-2.5">
+          <div className="text-[11px] text-slate-500">先月比</div>
+          <div className={`tabular-nums ${diff > 0 ? "text-emerald-600" : diff < 0 ? "text-rose-600" : "text-slate-700"}`} style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: 22, lineHeight: 1.2 }}>
+            {diff > 0 ? "+" : ""}{fmt(diff / 10000)}<span className="ml-0.5 text-xs">万円</span>
+          </div>
+        </div>
+        <div className="rounded-2xl bg-slate-50 px-3 py-2.5">
+          <div className="text-[11px] text-slate-500">{range === 12 ? "6" : "3"}か月後（予定）</div>
+          <div className="tabular-nums text-slate-900" style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: 22, lineHeight: 1.2 }}>
+            {fmt(futureTotal / 10000)}<span className="ml-0.5 text-xs">万円</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-1.5">
+        {STOCK_CATEGORIES.map((c) => {
+          const off = hidden.includes(c);
+          const amt = sumFor(thisMonth, [c]);
+          return (
+            <button
+              key={c}
+              onClick={() => toggle(c)}
+              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${off ? "border-slate-200 text-slate-400" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
+              title={off ? "クリックで表示" : "クリックで非表示"}
+            >
+              <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: off ? "transparent" : catColors[c], border: `2px solid ${catColors[c]}` }} />
+              <span className={off ? "line-through" : ""}>{c}</span>
+              <span className="tabular-nums text-slate-400">{fmt(amt / 10000)}万</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 h-72">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart key={animKey} data={data} margin={{ top: 40, right: 4, left: 0, bottom: 0 }} barCategoryGap="22%">
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" strokeOpacity={0.6} />
+            <XAxis
+              dataKey="month"
+              axisLine={false}
+              tickLine={false}
+              interval={0}
+              tick={({ x, y, payload, index }) => {
+                const row = data[index];
+                return (
+                  <text x={x} y={y + 14} textAnchor="middle" style={{ fontSize: 11, fontWeight: row && row.isNow ? 700 : 400, fill: row && row.isNow ? "var(--c-ink)" : "#94A3B8" }}>
+                    {payload.value}
+                  </text>
+                );
+              }}
+            />
+            <YAxis tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} width={34} />
+            <Tooltip content={<TrendTooltip />} cursor={{ fill: "rgba(148,163,184,.12)", radius: 8 }} />
+            {visibleCats.map((c, i) => (
+              <Bar
+                key={c}
+                dataKey={c}
+                stackId="a"
+                fill={catColors[c]}
+                radius={c === lastCat ? [6, 6, 0, 0] : [0, 0, 0, 0]}
+                isAnimationActive
+                animationBegin={i * 140}
+                animationDuration={700}
+                animationEasing="ease-out"
+              >
+                {data.map((row) => (
+                  <Cell key={row.key} fillOpacity={row.isFuture ? 0.45 : 1} />
+                ))}
+                {c === lastCat && <LabelList content={<TotalLabel />} />}
+              </Bar>
+            ))}
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
 function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete }) {
   const [editing, setEditing] = useState(null); // null | "new" | stock
   const [catFilter, setCatFilter] = useState("all");
@@ -3456,23 +3636,7 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete }) 
         ))}
       </div>
 
-      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-2 text-sm font-medium text-slate-700">ストック売上の推移（万円／月）</div>
-        <div className="h-56">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={trend}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} width={32} />
-              <Tooltip />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-              {STOCK_CATEGORIES.map((c) => (
-                <Bar key={c} dataKey={c} stackId="a" fill={catColors[c]} />
-              ))}
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
+      <StockTrendChart stocks={stocks} catColors={catColors} />
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap gap-1.5">
@@ -4958,7 +5122,7 @@ export default function App() {
     return navItems.map((item) => {
       const active = view === item.key;
       const isMonthly = item.key === "monthly";
-      const expanded = isMonthly && (monthlyNavOpen || active);
+      const expanded = isMonthly && monthlyNavOpen;
       return (
         <div key={item.key}>
           <button
