@@ -22,6 +22,14 @@ const USE_DEMO_SEED = false;
 const DEMO_ASSIGNEES = ["松本", "木村", "林", "清水"];
 // 担当者の初期リスト（ダミーを使わないときは実際の担当者）
 const ASSIGNEES = USE_DEMO_SEED ? DEMO_ASSIGNEES : ALLOWED_ASSIGNEES;
+// 担当者の並び順：岩瀧・荻田・岡田・荻田・岡田・小野・上地・千葉 → それ以外は50音順
+function sortAssignees(list) {
+  const rank = (a) => {
+    const i = ASSIGNEES.indexOf(a);
+    return i === -1 ? 999 : i;
+  };
+  return [...list].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, "ja"));
+}
 const DEAL_TYPES = ["新規", "既存"];
 
 const STATUS_LABEL = {
@@ -2291,7 +2299,7 @@ function AnalysisPage({ projects }) {
   const [category, setCategory] = useState("全体");
   const [confidence, setConfidence] = useState("すべて");
   const [assignee, setAssignee] = useState("全員");
-  const assigneeList = Array.from(new Set([...ASSIGNEES, ...projects.map((p) => p.assignee).filter(Boolean)]));
+  const assigneeList = sortAssignees(Array.from(new Set([...ASSIGNEES, ...projects.map((p) => p.assignee).filter(Boolean)])));
 
   const matchCat = (p) => category === "全体" || p.category === category;
   const matchConf = (p) => confidence === "すべて" || p.confidence === Number(confidence);
@@ -2666,18 +2674,31 @@ const PURPOSE_STYLES = {
   "納品・報告": { bg: "#f5f3ff", fg: "#6d28d9" },
 };
 
+// 担当者ごとのアクセントカラー（重ならないよう固定で割り当て）
+const ASSIGNEE_COLORS = {
+  岩瀧: "#4f46e5",
+  荻田: "#0891b2",
+  岡田: "#d97706",
+  "荻田・岡田": "#7c3aed",
+  小野: "#059669",
+  上地: "#db2777",
+  千葉: "#475569",
+};
+const ASSIGNEE_LABELS = { "荻田・岡田": "荻岡" };
+
 function colorFor(name) {
+  if (ASSIGNEE_COLORS[name]) return ASSIGNEE_COLORS[name];
   let h = 0;
   for (const ch of String(name || "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
 
 function Avatar({ name, size = 28 }) {
-  const label = String(name || "?").replace(/^(株式会社|有限会社|合同会社)/, "").slice(0, 1);
+  const label = ASSIGNEE_LABELS[name] || String(name || "?").replace(/^(株式会社|有限会社|合同会社)/, "").slice(0, 1);
   return (
     <span
       className="inline-flex shrink-0 items-center justify-center rounded-full font-semibold text-white"
-      style={{ width: size, height: size, background: colorFor(name), fontSize: Math.round(size * 0.42) }}
+      style={{ width: size, height: size, background: colorFor(name), fontSize: Math.round(size * (label.length > 1 ? 0.32 : 0.42)), letterSpacing: label.length > 1 ? "-0.05em" : undefined }}
     >
       {label}
     </span>
@@ -4990,7 +5011,7 @@ function VisitsPage({ visits, companies, projects, onAdd, onDelete, onOpenDetail
   const [search, setSearch] = useState("");
   const thisMonth = currentMonthKey();
   const lastMonth = addMonths(thisMonth, -1);
-  const assignees = Array.from(new Set(visits.map((v) => v.assignee).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja"));
+  const assignees = sortAssignees(Array.from(new Set(visits.map((v) => v.assignee).filter(Boolean))));
   const purposes = Array.from(new Set(visits.map((v) => v.purpose).filter(Boolean)));
   const q = search.trim().toLowerCase();
   const filtered = visits.filter((v) => {
@@ -5915,7 +5936,7 @@ export default function App() {
     [visibleProjects]
   );
   const assigneeNames = useMemo(
-    () => Array.from(new Set([...ASSIGNEES, ...projects.map((p) => p.assignee).filter(Boolean)])).sort((a, b) => a.localeCompare(b, "ja")),
+    () => sortAssignees(Array.from(new Set([...ASSIGNEES, ...projects.map((p) => p.assignee).filter(Boolean)]))),
     [projects]
   );
   const existingCsvKeys = useMemo(
