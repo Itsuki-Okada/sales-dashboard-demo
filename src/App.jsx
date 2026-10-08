@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Legend, Cell, LabelList,
+  Tooltip, ResponsiveContainer, Legend, Cell, LabelList, ReferenceLine,
 } from "recharts";
 import {
   Search, Plus, MoreHorizontal, ChevronDown, ChevronRight, ChevronLeft, X,
@@ -651,6 +651,62 @@ function unyoToStocks(parsed) {
     importedFrom: "unyo-csv",
   }));
   return [...fixedStocks, ...itemStocks];
+}
+
+// 運用売上CSVの内容と今あるストックを比べ、新規・変更・変更なしに分ける。
+// 同じ「項目＋会社名」の継続中ストックがあれば同一とみなし、金額かプランが違えば変更。
+const normName = (v) => String(v || "").replace(/\s|　/g, "").toLowerCase();
+function diffUnyoStocks(existing, incoming) {
+  const thisMonth = currentMonthKey();
+  const live = existing.filter((st) => !st.endMonth || st.endMonth >= thisMonth);
+  const used = new Set();
+  const added = [];
+  const changed = [];
+  const unchanged = [];
+  for (const next of incoming) {
+    const cands = live.filter((st) => !used.has(st.id) && st.category === next.category && normName(st.clientName) === normName(next.clientName));
+    const old = cands.find((st) => (st.plan || "") === (next.plan || "")) || cands[0];
+    if (!old) {
+      added.push(next);
+      continue;
+    }
+    used.add(old.id);
+    const sameAmount = Number(old.monthlyAmount) === Number(next.monthlyAmount);
+    const samePlan = (old.plan || "") === (next.plan || "");
+    const sameStart = old.startMonth <= thisMonth || old.startMonth === next.startMonth;
+    if (sameAmount && samePlan && sameStart) unchanged.push({ old, next });
+    else changed.push({ old, next });
+  }
+  return { added, changed, unchanged };
+}
+
+// 差分をストック一覧に反映する。
+// 変更：開始前のものはそのまま書き換え、すでに始まっているものは先月で終了させて今月から新しい金額で登録（過去のグラフを残すため）。
+function applyUnyoDiff(stocks, diff) {
+  const thisMonth = currentMonthKey();
+  const prevMonth = addMonths(thisMonth, -1);
+  let out = [...stocks];
+  for (const { old, next } of diff.changed) {
+    const planned = !next.monthlyAmount;
+    if (old.startMonth >= thisMonth) {
+      out = out.map((st) =>
+        st.id === old.id
+          ? { ...st, monthlyAmount: next.monthlyAmount, plan: next.plan, name: st.importedFrom ? next.name : st.name, startMonth: next.startMonth, planned, memo: next.memo }
+          : st
+      );
+    } else {
+      out = out.map((st) => (st.id === old.id ? { ...st, endMonth: prevMonth } : st));
+      out.push({
+        ...next,
+        id: uid(),
+        name: old.importedFrom ? next.name : old.name || next.name,
+        assignee: old.assignee || "",
+        startMonth: next.startMonth > thisMonth ? next.startMonth : thisMonth,
+        memo: `${next.memo}（${formatYen(old.monthlyAmount)}から変更）`,
+      });
+    }
+  }
+  return [...out, ...diff.added];
 }
 
 // ストック（月額）契約が指定月に有効か。
@@ -2265,7 +2321,7 @@ function YoyBadge({ yoy }) {
   );
 }
 
-function MonthlyRevenuePage({ projects }) {
+function MonthlyRevenuePage({ projects, monthlyTarget = 0 }) {
   const catColor = PROJECT_CAT_COLORS;
   const curFy = fiscalStart(currentMonthKey());
   const [fy, setFy] = useState(curFy);
@@ -2309,7 +2365,8 @@ function MonthlyRevenuePage({ projects }) {
       <StackedTrendCard
         key={fy}
         title={`月別の確定金額（${fiscalLabel(fy)}）`}
-        note="棒の上の数字は月の合計（万円）。受注・納品済みの確定金額を、受注予定月で集計しています。"
+        note="棒の上の数字は月の合計（万円）、その上は目標に対する差額（緑＝達成・赤＝未達）。点線は月間目標です。"
+        target={monthlyTarget}
         categories={CATEGORIES}
         colors={catColor}
         ranges={[{ key: fy, label: fiscalLabel(fy), periods }]}
@@ -3461,7 +3518,9 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0 }) {
   const [openMonth, setOpenMonth] = useState(null);
   const isDesktop = useIsDesktop();
   const presentMonths = projects.map((p) => p.scheduledMonth);
-  const months = Array.from(new Set([...monthKeysRange(-1, 4), ...presentMonths])).sort();
+  // 今期（8月〜翌年7月）の12か月は常に表示（例：2026年8月〜2027年7月）
+  const fiscalMonths = fiscalPeriods(fiscalStart(currentMonthKey())).map((p) => p.key);
+  const months = Array.from(new Set([...monthKeysRange(-1, 0), ...fiscalMonths, ...presentMonths])).sort();
   const thisMonth = currentMonthKey();
   const rows = months.map((m) => {
     const list = projects.filter((p) => p.scheduledMonth === m);
@@ -3775,6 +3834,7 @@ function StackedTrendCard({
   valueOf, // (periodKey, category) => 円
   nowLabel = "今月",
   summary, // ({ sumFor, periods, current }) => [{ label, value, tone }]
+  target = 0, // 目標金額（円）。指定すると横線と、目標に対する差額（黒字は緑・赤字は赤）を表示
 }) {
   const [hidden, setHidden] = useState([]);
   const narrow = useWindowWidth() < 640;
@@ -3799,15 +3859,32 @@ function StackedTrendCard({
   const toggle = (c) => setHidden((h) => (h.includes(c) ? h.filter((x) => x !== c) : [...h, c]));
   const crowded = narrow && periods.length > 6;
   const tiles = summary ? summary({ sumFor, periods, current }) : [];
+  const targetMan = target > 0 ? target / 10000 : 0;
+  const diffOf = (row) => (targetMan && !row.isFuture ? row.total - targetMan : null);
+  const fmtDiff = (d) => `${d >= 0 ? "+" : "−"}${fmt(Math.abs(d))}万円`;
+  const DIFF_UP = "#059669";
+  const DIFF_DOWN = "#e11d48";
 
   function TotalLabel({ x, y, width, index }) {
     const row = data[index];
     if (!row || row.total <= 0) return null;
     if (crowded && !row.isNow) return null; // スマホで本数が多いときは現在の期間だけ数字を出す
+    const diff = diffOf(row);
+    const hasDiff = diff !== null;
     return (
       <g>
+        {hasDiff && (
+          <text
+            x={x + width / 2}
+            y={y - 24}
+            textAnchor="middle"
+            style={{ fontSize: narrow ? 9.5 : 10.5, fontWeight: 700, fill: diff >= 0 ? DIFF_UP : DIFF_DOWN, fontFamily: "var(--font-num)" }}
+          >
+            {fmtDiff(diff)}
+          </text>
+        )}
         {row.isNow && (
-          <g transform={`translate(${x + width / 2}, ${y - 30})`}>
+          <g transform={`translate(${x + width / 2}, ${y - (hasDiff ? 46 : 30)})`}>
             <rect x={-18} y={-9} width={36} height={16} rx={8} fill="#4f46e5" />
             <text x={0} y={3} textAnchor="middle" style={{ fontSize: 10, fontWeight: 700, fill: "#fff" }}>{nowLabel}</text>
           </g>
@@ -3848,6 +3925,18 @@ function StackedTrendCard({
           <span>合計</span>
           <span className="tabular-nums">{fmt(row.total)}万円</span>
         </div>
+        {targetMan > 0 && (
+          <div className="mt-1 flex items-center justify-between text-[11px]">
+            <span className="text-slate-500">目標 {fmt(targetMan)}万円に対して</span>
+            {row.isFuture ? (
+              <span className="text-slate-400">—</span>
+            ) : (
+              <span className="tabular-nums font-semibold" style={{ color: row.total - targetMan >= 0 ? DIFF_UP : DIFF_DOWN }}>
+                {fmtDiff(row.total - targetMan)}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -3905,7 +3994,7 @@ function StackedTrendCard({
 
       <div className="mt-3 h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart key={`${rangeKey}-${hidden.join(",")}`} data={data} margin={{ top: 40, right: 4, left: 0, bottom: 0 }} barCategoryGap="22%">
+          <BarChart key={`${rangeKey}-${hidden.join(",")}`} data={data} margin={{ top: targetMan ? 58 : 40, right: targetMan && !narrow ? 70 : 4, left: 0, bottom: 0 }} barCategoryGap="22%">
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" strokeOpacity={0.6} />
             <XAxis
               dataKey="label"
@@ -3921,7 +4010,13 @@ function StackedTrendCard({
                 );
               }}
             />
-            <YAxis tick={{ fontSize: 11, fill: "#94A3B8" }} axisLine={false} tickLine={false} width={40} />
+            <YAxis
+              tick={{ fontSize: 11, fill: "#94A3B8" }}
+              axisLine={false}
+              tickLine={false}
+              width={40}
+              domain={[0, (max) => { const v = Math.max(max, targetMan * 1.08) || 1; const step = v > 500 ? 100 : v > 100 ? 50 : 10; return Math.ceil(v / step) * step; }]}
+            />
             <Tooltip content={<TrendTooltip />} cursor={{ fill: "rgba(148,163,184,.12)", radius: 8 }} />
             {visibleCats.map((c, i) => (
               <Bar
@@ -3942,6 +4037,27 @@ function StackedTrendCard({
                 {c === lastCat && <LabelList content={<TotalLabel />} />}
               </Bar>
             ))}
+            {targetMan > 0 && (
+              <ReferenceLine
+                y={targetMan}
+                stroke="#e11d48"
+                strokeDasharray="6 4"
+                strokeWidth={1.5}
+                ifOverflow="extendDomain"
+                label={({ viewBox }) => (
+                  <g>
+                    {narrow ? (
+                      <text x={viewBox.x + 4} y={viewBox.y - 5} style={{ fontSize: 10, fontWeight: 700, fill: "#e11d48" }}>目標 {fmt(targetMan)}万</text>
+                    ) : (
+                      <g transform={`translate(${viewBox.x + viewBox.width + 6}, ${viewBox.y})`}>
+                        <rect x={0} y={-10} width={62} height={20} rx={10} fill="#e11d48" />
+                        <text x={31} y={4} textAnchor="middle" style={{ fontSize: 10.5, fontWeight: 700, fill: "#fff" }}>目標 {fmt(targetMan)}万</text>
+                      </g>
+                    )}
+                  </g>
+                )}
+              />
+            )}
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -4018,7 +4134,7 @@ function StockTrendChart({ stocks }) {
   );
 }
 
-function UnyoImportModal({ open, onClose, onImport, existingCount }) {
+function UnyoImportModal({ open, onClose, onImport, existingCount, stocks = [] }) {
   const [fileName, setFileName] = useState("");
   const [parsed, setParsed] = useState(null);
   const [error, setError] = useState("");
@@ -4059,6 +4175,10 @@ function UnyoImportModal({ open, onClose, onImport, existingCount }) {
       ]
     : [];
   const total = rows.reduce((a, r) => a + r.amount, 0);
+  const incoming = useMemo(() => (parsed ? unyoToStocks(parsed) : []), [parsed]);
+  const diff = useMemo(() => diffUnyoStocks(stocks, incoming), [stocks, incoming]);
+  const applyCount = replaceAll ? incoming.length : diff.added.length + diff.changed.length;
+  const labelOf = (st) => (st.clientName === "全体（月間平均）" ? `${st.category}（月間平均）` : st.clientName);
 
   return (
     <Modal open={open} onClose={close} title="運用売上CSVを読み込む" width="max-w-xl">
@@ -4103,25 +4223,61 @@ function UnyoImportModal({ open, onClose, onImport, existingCount }) {
           {parsed.warnings.length > 0 && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">{parsed.warnings.join(" / ")}</div>
           )}
+          {!replaceAll && (
+            <div className="overflow-hidden rounded-xl border border-slate-200">
+              <div className="grid grid-cols-3 divide-x divide-slate-100 border-b border-slate-100 bg-slate-50 text-center">
+                <div className="px-2 py-2"><div className="text-[11px] text-slate-500">新規</div><div className="text-lg font-semibold text-indigo-600" style={NUM_FONT_STYLE}>{diff.added.length}<span className="text-xs font-normal text-slate-400">件</span></div></div>
+                <div className="px-2 py-2"><div className="text-[11px] text-slate-500">金額・内容の変更</div><div className="text-lg font-semibold text-amber-600" style={NUM_FONT_STYLE}>{diff.changed.length}<span className="text-xs font-normal text-slate-400">件</span></div></div>
+                <div className="px-2 py-2"><div className="text-[11px] text-slate-500">変更なし（読み込まない）</div><div className="text-lg font-semibold text-slate-400" style={NUM_FONT_STYLE}>{diff.unchanged.length}<span className="text-xs font-normal text-slate-400">件</span></div></div>
+              </div>
+              <div className="max-h-56 overflow-y-auto">
+                {diff.changed.map(({ old, next }) => (
+                  <div key={old.id} className="flex items-center justify-between gap-3 border-b border-slate-100 px-3 py-2 text-xs last:border-b-0">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">変更</span>
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: STOCK_COLORS[next.category] }} />
+                      <span className="truncate font-medium text-slate-700">{labelOf(next)}</span>
+                      {(old.plan || "") !== (next.plan || "") && <span className="truncate text-slate-400">{old.plan || "プランなし"} → {next.plan || "プランなし"}</span>}
+                    </span>
+                    <span className="shrink-0 tabular-nums text-slate-500">
+                      {formatYen(old.monthlyAmount)} → <b className="text-slate-800">{next.monthlyAmount ? formatYen(next.monthlyAmount) : "運用予定"}</b>
+                    </span>
+                  </div>
+                ))}
+                {diff.added.map((next, i) => (
+                  <div key={`a${i}`} className="flex items-center justify-between gap-3 border-b border-slate-100 px-3 py-2 text-xs last:border-b-0">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">新規</span>
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: STOCK_COLORS[next.category] }} />
+                      <span className="truncate font-medium text-slate-700">{labelOf(next)}</span>
+                      {next.plan && <span className="truncate text-slate-400">{next.plan}</span>}
+                    </span>
+                    <span className="shrink-0 tabular-nums font-semibold text-slate-800">{next.monthlyAmount ? formatYen(next.monthlyAmount) : <span className="font-medium text-amber-700">運用予定</span>}</span>
+                  </div>
+                ))}
+                {applyCount === 0 && <div className="px-3 py-4 text-center text-xs text-slate-400">今のストックと同じ内容のため、読み込むものはありません。</div>}
+              </div>
+            </div>
+          )}
           <label className="flex items-start gap-2 rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
             <input type="checkbox" className="mt-0.5" checked={replaceAll} onChange={(e) => setReplaceAll(e.target.checked)} />
             <span>今あるストックをすべて消して、このCSVの内容だけにする（サンプルや手入力したストックも削除されます）</span>
           </label>
           <div className="text-xs text-slate-400">
-            {replaceAll ? "読み込むと、ストックはこのCSVの内容だけになります。" : existingCount > 0
-              ? `前回このCSVから読み込んだ${existingCount}件は、今回の内容に置き換わります（手入力したストックはそのまま残ります）。`
-              : "読み込んだ内容は今月からのストックとして登録されます。"}
+            {replaceAll
+              ? "読み込むと、ストックはこのCSVの内容だけになります。"
+              : "変更のないものは読み込みません。金額が変わったものは先月までの金額を残し、今月から新しい金額に切り替えます。CSVにない既存のストックはそのまま残ります。"}
           </div>
         </div>
       )}
       <div className="mt-6 flex justify-end gap-2">
         <button onClick={close} className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">キャンセル</button>
         <button
-          disabled={!parsed}
-          onClick={() => onImport(unyoToStocks(parsed), replaceAll)}
+          disabled={!parsed || applyCount === 0}
+          onClick={() => onImport(replaceAll ? { replaceAll: true, list: incoming } : { diff })}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
         >
-          {parsed ? `${parsed.fixed.length + parsed.items.length}件を読み込む` : "読み込む"}
+          {!parsed ? "読み込む" : applyCount === 0 ? "変更はありません" : `${applyCount}件を反映する`}
         </button>
       </div>
     </Modal>
@@ -4257,8 +4413,9 @@ function StockPage({ stocks, companies, assignees, onAdd, onUpdate, onDelete, on
         open={showUnyo}
         onClose={() => setShowUnyo(false)}
         existingCount={stocks.filter((st) => st.importedFrom === "unyo-csv").length}
-        onImport={(list, replaceAll) => {
-          onImportUnyo && onImportUnyo(list, replaceAll);
+        stocks={stocks}
+        onImport={(payload) => {
+          onImportUnyo && onImportUnyo(payload);
           setShowUnyo(false);
         }}
       />
@@ -5609,9 +5766,15 @@ export default function App() {
     setStocks((l) => l.map((x) => (x.id === id ? { ...x, ...form } : x)));
     pushToast("ストックを更新しました");
   }
-  function importUnyoStocks(list, replaceAll = false) {
-    setStocks((l) => (replaceAll ? list : [...l.filter((x) => x.importedFrom !== "unyo-csv"), ...list]));
-    pushToast(`運用売上CSVから${list.length}件のストックを読み込みました`);
+  function importUnyoStocks(payload) {
+    if (payload.replaceAll) {
+      setStocks(payload.list);
+      pushToast(`運用売上CSVの${payload.list.length}件でストックを置き換えました`);
+      return;
+    }
+    const { diff } = payload;
+    setStocks((l) => applyUnyoDiff(l, diff));
+    pushToast(`運用売上CSVを反映しました（新規${diff.added.length}件・変更${diff.changed.length}件／変更なし${diff.unchanged.length}件は読み込みませんでした）`);
   }
   function deleteStock(st) {
     setStocks((l) => l.filter((x) => x.id !== st.id));
@@ -6038,7 +6201,7 @@ export default function App() {
 
           {view === "monthlyRevenue" && (
             <div className="mx-auto max-w-6xl">
-              <MonthlyRevenuePage projects={visibleProjects} />
+              <MonthlyRevenuePage projects={visibleProjects} monthlyTarget={monthlyTarget} />
             </div>
           )}
 
