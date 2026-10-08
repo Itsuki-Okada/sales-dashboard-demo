@@ -3312,7 +3312,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
     ["HOT", hot, "#e11d48", "bg-rose-50 text-rose-600"],
     ["WARM", warm, "#d97706", "bg-amber-50 text-amber-600"],
     ["COOL", cool, "#0284c7", "bg-sky-50 text-sky-600"],
-    ["ストック", stock, "#7c3aed", "bg-violet-50 text-violet-600"],
+
   ];
 
   // 直近6か月の確定金額（ミニ推移）
@@ -3406,6 +3406,11 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
                 {manN(confirmed)}
                 <span className="ml-1 text-sm font-semibold">万円</span>
               </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500">
+                <span>受注・納品 {formatManYen(c.confirmedTotal)}</span>
+                {baseOf(month) > 0 && <span>制作基礎数字 {formatManYen(baseOf(month))}</span>}
+                <span className="font-medium text-violet-600">ストック {formatManYen(stock)}</span>
+              </div>
             </div>
             <div className="text-right">
               <div className="text-xs text-slate-500">目標まで</div>
@@ -3433,7 +3438,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2.5">
+          <div className="grid grid-cols-3 gap-2.5">
             {tiles.map(([lb, v, dot, cls]) => (
               <div key={lb} className={`flex items-center justify-between rounded-2xl px-4 py-3 ${cls}`}>
                 <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
@@ -3738,6 +3743,7 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
       lost: c.lost,
       rate: c.rate,
       confirmed: confirmedAll,
+      projConfirmed: c.confirmedTotal,
       hot: sum(open.filter((p) => p.confidence === 3)),
       warm: sum(open.filter((p) => p.confidence === 2)),
       cool: sum(open.filter((p) => p.confidence === 1)) + sum(refList),
@@ -3754,6 +3760,8 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
     { key: "warm", label: "WARM", dot: "#d97706", cls: "bg-amber-50 text-amber-600" },
     { key: "cool", label: "COOL", dot: "#0284c7", cls: "bg-sky-50 text-sky-600" },
     { key: "stock", label: "ストック", dot: "#7c3aed", cls: "bg-violet-50 text-violet-600" },
+    { key: "projConfirmed", label: "受注・納品済み", dot: "#059669", cls: "bg-emerald-50/60 text-emerald-700" },
+    { key: "baseAmt", label: "制作基礎数字", dot: REVENUE_EXTRA_COLORS[BASE_REVENUE_LABEL], cls: "bg-slate-50 text-slate-700" },
   ];
   const NUM_FONT = { fontFamily: "var(--font-num)" };
   const manN = (n) => Math.round(n / 10000).toLocaleString("ja-JP");
@@ -3912,7 +3920,18 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
         </div>
 
         <div className="flex flex-col gap-1.5">
-          {LIST.filter((it) => it.key === "confirmed").map(renderLine)}
+          {/* 確定金額 = 受注・納品済み + 制作基礎数字 + ストック */}
+          <div className="rounded-2xl border border-emerald-200 p-1.5">
+            <div className="flex items-center justify-between px-1.5 pb-1.5 pt-0.5">
+              <span className="text-xs font-medium text-emerald-700">確定金額</span>
+              <span className="tabular-nums text-emerald-700" style={{ ...NUM_FONT, fontWeight: 600, fontSize: 16 }}>
+                {manN(r.confirmed)}<span className="ml-0.5 text-[11px]">万円</span>
+              </span>
+            </div>
+            <div className="flex flex-col gap-1">
+              {LIST.filter((it) => ["projConfirmed", "baseAmt", "stock"].includes(it.key)).map(renderLine)}
+            </div>
+          </div>
           <div className="rounded-2xl border border-slate-200 p-1.5">
             <div className="flex items-center justify-between px-1.5 pb-1.5 pt-0.5">
               <span className="text-xs font-medium text-slate-500">見込み金額（HOT＋WARM＋COOL）</span>
@@ -3924,7 +3943,6 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
               {LIST.filter((it) => ["hot", "warm", "cool"].includes(it.key)).map(renderLine)}
             </div>
           </div>
-          {LIST.filter((it) => it.key === "stock").map(renderLine)}
         </div>
         <div className="text-center text-xs text-slate-500">{isOpen ? "▴ 案件を閉じる" : "▾ 案件を見る"}</div>
       </button>
