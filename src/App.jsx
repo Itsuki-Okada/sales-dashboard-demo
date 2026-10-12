@@ -818,6 +818,8 @@ function salesItemToProject(x, source) {
     extra = { status: "active", confidence: 2, estimatedAmount: x.amount || 0, confirmedAmount: null };
   }
   const p = { ...base, ...extra };
+  // 受注月未定の案件はすべてCOOL
+  if (!p.scheduledMonth) p.confidence = 1;
   p.history = [{ id: uid(), date: now, type: "created", label: source === "plan" ? "売上計画CSVから登録" : "アタックリストCSVから登録", scheduledMonth: p.scheduledMonth }];
   if (p.status === "won" || p.status === "delivered") p.history.push({ id: uid(), date: now, type: "won", label: "受注", previousStatus: "active" });
   if (p.status === "lost") p.history.push({ id: uid(), date: now, type: "lost", label: "ロスト", previousStatus: "active" });
@@ -3277,7 +3279,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
   const sumOf = (arr) => arr.reduce((a, p) => a + (Number(p.estimatedAmount) || 0), 0);
   const hot = sumOf(open.filter((p) => p.confidence === 3));
   const warm = sumOf(open.filter((p) => p.confidence === 2));
-  const cool = sumOf(open.filter((p) => p.confidence === 1)) + sumOf(refs.filter((p) => p.scheduledMonth === month && p.status === "active")); // 参考見積りもCOOLに含める
+  const cool = sumOf(open.filter((p) => p.confidence === 1)); // 参考見積りは見込み金額に含めない
   const stock = stockOfMonth(month);
   const postponed = projects.reduce((acc, p) => acc + p.history.filter((h) => h.type === "postponed" && h.fromMonth === month).length, 0);
   const isNow = month === currentMonthKey();
@@ -3406,11 +3408,6 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
               <div className="tabular-nums text-emerald-700" style={numStyle(34, 600)}>
                 {manN(confirmed)}
                 <span className="ml-1 text-sm font-semibold">万円</span>
-              </div>
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500">
-                <span>受注・納品 {formatManYen(c.confirmedTotal)}</span>
-                {baseOf(month) > 0 && <span>制作基礎数字 {formatManYen(baseOf(month))}</span>}
-                <span className="font-medium text-violet-600">ストック {formatManYen(stock)}</span>
               </div>
             </div>
             <div className="text-right">
@@ -3732,7 +3729,7 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
     const baseAmt = baseOf(m);
     const refList = refs.filter((p) => p.scheduledMonth === m && p.status === "active");
     const confirmedAll = c.confirmedTotal + baseAmt + stockTotal; // ストック売上も確定金額に含める
-    const forecast = confirmedAll + sum(open) + sum(refList);
+    const forecast = confirmedAll + sum(open); // 参考見積りは見込み金額に含めない
     return {
       month: m,
       list,
@@ -3747,7 +3744,7 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
       projConfirmed: c.confirmedTotal,
       hot: sum(open.filter((p) => p.confidence === 3)),
       warm: sum(open.filter((p) => p.confidence === 2)),
-      cool: sum(open.filter((p) => p.confidence === 1)) + sum(refList),
+      cool: sum(open.filter((p) => p.confidence === 1)),
       stock: stockTotal,
       grand: forecast,
       target: tFor(m),
@@ -3812,7 +3809,7 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
         {r.refList.length > 0 && (
           <div>
             <div className="mb-1 flex items-center gap-1 text-xs font-medium text-sky-700">
-              <FileText size={12} /> 参考見積り（COOLに含む） {formatManYen(r.refList.reduce((x, p) => x + (Number(p.estimatedAmount) || 0), 0))}
+              <FileText size={12} /> 参考見積り（見込み金額には含めない） {formatManYen(r.refList.reduce((x, p) => x + (Number(p.estimatedAmount) || 0), 0))}
             </div>
             <div className="flex flex-col gap-1">
               {r.refList.map((p) => (
@@ -5311,7 +5308,7 @@ function ReferenceEstimatesPage({ referenceProjects, onPromote, onEdit, onDelete
     <div className="flex flex-col gap-5">
       <div className="flex flex-col gap-3 rounded-[22px] border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
         <div className="max-w-xl text-sm leading-relaxed text-slate-500">
-          参考見積りはすべてCOOLとして扱い、受注予定月があるものは月別状況・ダッシュボードのCOOLに含めます。「本見積もりにする」で通常の案件になります。
+          参考見積りはCOOL扱いですが、見込み金額（月別状況・ダッシュボード）には含めません。「本見積もりにする」で通常の案件になります。
         </div>
         <button onClick={onAdd} className="flex shrink-0 items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
           <Plus size={16} />
@@ -5913,7 +5910,7 @@ const PAGE_META = {
   companies: ["会社一覧", "取引先ごとの案件・受注率・訪問状況を確認できます。"],
   visits: ["訪問記録", "訪問の履歴を一覧とカレンダーで確認・登録できます。"],
   undecided: ["受注月未定（進行中）", "受注予定日が決まっていない案件です。受注月を設定すると月別の画面に反映されます。"],
-  reference: ["参考見積り", "参考見積り全体・受注予定月あり・受注月未定で切り替えて確認できます（すべてCOOL扱い）。"],
+  reference: ["参考見積り", "参考見積り全体・受注予定月あり・受注月未定で切り替えて確認できます（見込み金額には含めません）。"],
 };
 
 export default function App() {
@@ -6293,6 +6290,7 @@ export default function App() {
         id: uid(),
         ...form,
         scheduledMonth: form.monthUndecided ? null : form.scheduledMonth || null,
+        confidence: form.monthUndecided ? 1 : form.confidence, // 受注月未定はCOOL
         estimatedAmount: Number(form.estimatedAmount) || 0,
         confirmedAmount: null,
         status: "active",
@@ -6319,6 +6317,7 @@ export default function App() {
         id: uid(),
         ...form,
         scheduledMonth: form.monthUndecided ? null : form.scheduledMonth || null,
+        confidence: form.monthUndecided ? 1 : form.confidence, // 受注月未定はCOOL
         estimatedAmount: Number(form.estimatedAmount) || 0,
         confirmedAmount: null,
         status: "active",
@@ -6366,11 +6365,13 @@ export default function App() {
 
   function saveEditProject(form) {
     const { monthUndecided, ...rest } = form;
-    updateProject(editing.id, { ...rest, scheduledMonth: monthUndecided ? null : rest.scheduledMonth || null, estimatedAmount: Number(form.estimatedAmount) || 0, amountMissing: !(Number(form.estimatedAmount) > 0) && editing.amountMissing });
+    updateProject(editing.id, { ...rest, confidence: monthUndecided ? 1 : rest.confidence, scheduledMonth: monthUndecided ? null : rest.scheduledMonth || null, estimatedAmount: Number(form.estimatedAmount) || 0, amountMissing: !(Number(form.estimatedAmount) > 0) && editing.amountMissing });
     pushToast("案件を更新しました");
     setEditing(null);
   }
 
+  // 左メニューで一時的に隠すページ（戻すときはこの配列から消す）
+  const HIDDEN_NAV = ["analysis", "visits"];
   const navItems = [
     { key: "dashboard", label: "ダッシュボード", icon: LayoutDashboard },
     { key: "analysis", label: "受注率分析", icon: BarChart3 },
@@ -6385,7 +6386,7 @@ export default function App() {
 
   // サイドメニュー（月別状況は「全体／担当者」のサブメニューを開く）
   function renderNav(afterSelect) {
-    return navItems.map((item) => {
+    return navItems.filter((item) => !HIDDEN_NAV.includes(item.key)).map((item) => {
       if (item.sub) {
         const groupActive = item.sub.some((x) => x.key === view);
         const open = undecidedNavOpen;

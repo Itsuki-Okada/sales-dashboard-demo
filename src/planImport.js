@@ -211,8 +211,8 @@ export function parseAttackCsv(text, { minUpdated = "2026-08-01" } = {}) {
       skipped.moved++;
       continue;
     }
-    const scheduled = parseYm(get(r, "scheduled"));
     const updated = parseYmd(get(r, "updated"));
+    const scheduled = parseYm(get(r, "scheduled"), { updated });
     const amount = yenOf(get(r, "amount"));
     if (!scheduled && !updated && !amount) {
       skipped.empty++;
@@ -251,14 +251,31 @@ export function parseAttackCsv(text, { minUpdated = "2026-08-01" } = {}) {
   return { type: "attack", items, skipped };
 }
 
-function parseYm(v) {
-  const s = String(v || "").trim();
-  let m = s.match(/(\d{4})\s*[年\/\-.]\s*(\d{1,2})/);
-  if (!m) return null;
-  return `${m[1]}-${String(m[2]).padStart(2, "0")}`;
+// 全角数字を半角に
+const toHalf = (v) => String(v || "").replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xfee0));
+
+// "2026年9月" "2026/9" に加え、年なしの "9月" "９月" にも対応。
+// 年がないときは更新日に一番近い年にする（更新日もなければ年が分からないため未記入扱い）。
+function parseYm(v, { updated = null } = {}) {
+  const s = toHalf(v).trim();
+  const m = s.match(/(\d{4})\s*[年\/\-.]\s*(\d{1,2})/);
+  if (m) return `${m[1]}-${String(m[2]).padStart(2, "0")}`;
+  const mo = s.match(/^(\d{1,2})\s*月/);
+  if (!mo) return null;
+  const month = Number(mo[1]);
+  if (month < 1 || month > 12) return null;
+  const mm = String(month).padStart(2, "0");
+  if (updated) {
+    const uy = Number(updated.slice(0, 4));
+    const um = Number(updated.slice(5, 7));
+    const base = uy * 12 + um;
+    const best = [uy - 1, uy, uy + 1].sort((a, b) => Math.abs(a * 12 + month - base) - Math.abs(b * 12 + month - base))[0];
+    return `${best}-${mm}`;
+  }
+  return null;
 }
 function parseYmd(v) {
-  const s = String(v || "").trim();
+  const s = toHalf(v).trim();
   const m = s.match(/(\d{4})\s*[年\/\-.]\s*(\d{1,2})\s*[月\/\-.]?\s*(\d{1,2})?/);
   if (!m) return null;
   return `${m[1]}-${String(m[2]).padStart(2, "0")}-${String(m[3] || 1).padStart(2, "0")}`;
