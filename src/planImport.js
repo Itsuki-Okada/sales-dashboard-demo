@@ -89,7 +89,7 @@ export function parsePlanCsv(text, fiscalStartYear) {
 
   const targets = {};
   const base = {};
-  const confirmed = [];
+  const confirmed = []; // 確定売上は読み込まない（互換のため空のまま返す）
   const hot = [];
   let skippedStock = 0;
   let skippedAssignee = 0;
@@ -119,27 +119,31 @@ export function parsePlanCsv(text, fiscalStartYear) {
     }
   }
 
-  // セクションの範囲を探す
-  const isHeaderRow = (r, last) => blocks.some((b) => clean(r[b.col]) === "担当" && clean(r[b.col + 1]) === "取引先" && clean(r[b.col + 4]) === last);
-  const confHeader = rows.findIndex((r) => isHeaderRow(r, "備考"));
-  const confEnd = rows.findIndex((r, i) => i > confHeader && blocks.some((b) => clean(r[b.col]) === "合計"));
-  const hotHeader = rows.findIndex((r) => isHeaderRow(r, "確率"));
+  // 読み込む範囲：「◯月 見積提出 未決定売上」（シートの34行目）から60行目まで → HOT
+  // 受注済み・請求済みの確定売上（3〜30行目）と、右端の AF列（見込合計金額・他 見積発生案件）は読み込まない。
+  const AF_COL = 31; // A=0 … AF=31
+  const useBlocks = blocks.filter((b) => b.col + 4 < AF_COL);
+  const isHeaderRow = (r, last) => useBlocks.some((b) => clean(r[b.col]) === "担当" && clean(r[b.col + 1]) === "取引先" && clean(r[b.col + 4]) === last);
+  let titleRow = rows.findIndex((r) => r.slice(0, AF_COL).some((c) => /見積提出/.test(c) && /未決定売上/.test(c)));
+  const hotHeader = rows.findIndex((r, i) => i >= Math.max(titleRow, 0) && isHeaderRow(r, "確率"));
+  if (titleRow === -1) titleRow = hotHeader;
+  // 終わり：「個別見込売上」の行の手前、かつ タイトル行から数えて60行目まで（34行目→60行目の27行分）
   let hotEnd = rows.findIndex((r, i) => i > hotHeader && r.some((c) => clean(c) === "個別見込売上"));
   if (hotEnd === -1) hotEnd = rows.length;
+  if (titleRow !== -1) hotEnd = Math.min(hotEnd, titleRow + 27);
 
   function readSection(from, to, kind, out) {
     if (from === -1) return;
     const seen = {};
     for (let i = from + 1; i < (to === -1 ? rows.length : to); i++) {
       const r = rows[i];
-      for (const b of blocks) {
+      for (const b of useBlocks) {
         const assignee = clean(r[b.col]);
         const clientName = clean(r[b.col + 1]);
         const name = clean(r[b.col + 2]);
         const amountRaw = r[b.col + 3];
-        const note = clean(r[b.col + 4]);
         if (!clientName && !name) continue;
-        if (clientName === "制作基礎数字" || clientName === "基礎数字実売上") continue;
+        if (clientName === "制作基礎数字" || clientName === "基礎数字実売上" || clientName === "見込合計金額") continue;
         if (STOCK_ASSIGNEES.includes(assignee)) {
           skippedStock++;
           continue;
@@ -161,16 +165,14 @@ export function parsePlanCsv(text, fiscalStartYear) {
           clientName,
           name: name || "（項目未記入）",
           amount,
-          note: kind === "confirmed" ? note : "",
+          note: "",
           category: guessCategory(name),
         });
       }
     }
   }
-  readSection(confHeader, confEnd, "confirmed", confirmed);
   readSection(hotHeader, hotEnd, "hot", hot);
-  if (confHeader === -1) warnings.push("確定売上の見出し行（担当・取引先・項目・金額・備考）が見つかりませんでした");
-  if (hotHeader === -1) warnings.push("見積提出の見出し行（担当・取引先・項目・金額・確率）が見つかりませんでした");
+  if (hotHeader === -1) warnings.push("「見積提出 未決定売上」の見出し行（担当・取引先・項目・金額・確率）が見つかりませんでした");
 
   return { type: "plan", months: blocks.map((b) => b.month), targets, base, confirmed, hot, skippedStock, skippedAssignee, warnings, prevYear };
 }
@@ -179,7 +181,9 @@ export function parsePlanCsv(text, fiscalStartYear) {
 
 export function parseAttackCsv(text, { minUpdated = "2026-08-01" } = {}) {
   const rows = parseCsvRows(text);
-  const hIdx = rows.findIndex((r) => r.some((c) => compact(c) === "ステージ"));
+  // 見出し行：「ステージ」がある行。見出しの「ステージ」が空欄のCSVもあるため、「クライアント名」と「案件名」がある行でも可
+  let hIdx = rows.findIndex((r) => r.some((c) => compact(c) === "ステージ"));
+  if (hIdx === -1) hIdx = rows.findIndex((r) => r.some((c) => compact(c) === "クライアント名") && r.some((c) => compact(c) === "案件名"));
   if (hIdx === -1) return null;
   const header = rows[hIdx].map(compact);
   const col = (...names) => {
@@ -190,7 +194,7 @@ export function parseAttackCsv(text, { minUpdated = "2026-08-01" } = {}) {
     return -1;
   };
   const C = {
-    stage: col("ステージ"),
+    stage: col("ステージ") !== -1 ? col("ステージ") : Math.max(0, col("担当者", "担当", "営業担当") - 1),
     assignee: col("担当者", "担当", "営業担当"),
     scheduled: col("受注予定日", "受注予定"),
     client: col("クライアント名", "会社名", "客先"),
@@ -222,7 +226,9 @@ export function parseAttackCsv(text, { minUpdated = "2026-08-01" } = {}) {
     const updated = parseYmd(get(r, "updated"));
     const scheduled = parseYm(get(r, "scheduled"), { updated });
     const amount = yenOf(get(r, "amount"));
-    if (!scheduled && !updated && !amount) {
+    // 受注予定日・更新日・売上見込額がすべて空欄の行は読み込まない。
+    // ただし進行中（案件提案中）は、受注予定日・売上見込額が空欄ならCOOLとして読み込む（更新日は見ない）
+    if (!scheduled && !updated && !amount && stage !== "active") {
       skipped.empty++;
       continue;
     }
@@ -342,7 +348,7 @@ export function parseSalesFile(text, fiscalStartYear) {
     const p = parsePlanCsv(text, fiscalStartYear);
     if (p) return p;
   }
-  if (/ステージ/.test(text)) {
+  if (/ステージ/.test(text) || (/クライアント名/.test(text) && /案件名/.test(text))) {
     const a = parseAttackCsv(text, { minUpdated: `${fiscalStartYear}-08-01` });
     if (a) return a;
   }
