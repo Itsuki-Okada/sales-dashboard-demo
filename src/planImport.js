@@ -94,6 +94,7 @@ export function parsePlanCsv(text, fiscalStartYear) {
   let skippedStock = 0;
   let skippedAssignee = 0;
   const warnings = [];
+  const prevYear = {}; // { "2025-08": 円 }  前年同月の売上
 
   // 目標金額・制作基礎数字
   for (const r of rows) {
@@ -107,6 +108,13 @@ export function parsePlanCsv(text, fiscalStartYear) {
       if (next === "制作基礎数字") {
         const v = yenOf(r[b.col + 3]);
         if (v !== null) base[b.month] = v;
+      }
+      // 前年度売上（前年同月の売上）
+      for (let k = 0; k <= 3; k++) {
+        if (clean(r[b.col + k]) === "前年度売上") {
+          const v = yenOf(r[b.col + k + 1]);
+          if (v) prevYear[prevYearKey(b.month)] = v;
+        }
       }
     }
   }
@@ -164,7 +172,7 @@ export function parsePlanCsv(text, fiscalStartYear) {
   if (confHeader === -1) warnings.push("確定売上の見出し行（担当・取引先・項目・金額・備考）が見つかりませんでした");
   if (hotHeader === -1) warnings.push("見積提出の見出し行（担当・取引先・項目・金額・確率）が見つかりませんでした");
 
-  return { type: "plan", months: blocks.map((b) => b.month), targets, base, confirmed, hot, skippedStock, skippedAssignee, warnings };
+  return { type: "plan", months: blocks.map((b) => b.month), targets, base, confirmed, hot, skippedStock, skippedAssignee, warnings, prevYear };
 }
 
 /* -------------------------- アタックリスト -------------------------- */
@@ -282,7 +290,54 @@ function parseYmd(v) {
 }
 
 // 中身から種類を判定して読み込む
+const prevYearKey = (m) => `${Number(m.slice(0, 4)) - 1}${m.slice(4)}`;
+
+/* ---------------------------- 月次売上シート ---------------------------- */
+// 各月のシート（例：10月）。「現在 売上」（K列3行目付近）の金額をその月の確定売上にする。
+// 期はファイル名の「19期」などから判断（19期 = 2026年8月〜2027年7月）。なければ今の期。
+export function parseMonthlySheet(text, fiscalStartYear) {
+  const rows = parseCsvRows(text);
+  const head = rows.slice(0, 6);
+  let month = null;
+  for (const r of head.slice(0, 3)) {
+    const c = r.map((v) => toHalf(v).trim()).find((v) => /^\d{1,2}月$/.test(v));
+    if (c) {
+      month = Number(c.replace("月", ""));
+      break;
+    }
+  }
+  if (!month) return null;
+  let amount = null;
+  for (const r of head) {
+    const i = r.findIndex((v) => compact(v) === "現在売上");
+    if (i !== -1) {
+      for (let k = i + 1; k < Math.min(r.length, i + 4); k++) {
+        const v = yenOf(r[k]);
+        if (v !== null) {
+          amount = v;
+          break;
+        }
+      }
+      break;
+    }
+  }
+  if (amount === null && rows[2]) amount = yenOf(rows[2][10]); // 予備：K列3行目
+  if (amount === null) return null;
+  const year = month >= 8 ? fiscalStartYear : fiscalStartYear + 1;
+  return { type: "monthly", month: `${year}-${String(month).padStart(2, "0")}`, amount };
+}
+
+// ファイル名の「◯期」から期の開始年を求める（19期 → 2026）
+export function fiscalStartFromName(name) {
+  const m = toHalf(name || "").match(/(\d{1,3})\s*期/);
+  return m ? 2007 + Number(m[1]) : null;
+}
+
 export function parseSalesFile(text, fiscalStartYear) {
+  if (/現在\s*売上/.test(text) && /目標金額/.test(text) && !/制作基礎数字/.test(text)) {
+    const ms = parseMonthlySheet(text, fiscalStartYear);
+    if (ms) return ms;
+  }
   if (/制作基礎数字/.test(text)) {
     const p = parsePlanCsv(text, fiscalStartYear);
     if (p) return p;

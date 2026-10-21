@@ -10,7 +10,7 @@ import {
   TrendingUp, TrendingDown, Building2, Truck, Menu, MapPin, FileCheck,
   ArrowUpDown, Target, Link2, FileText, Upload, AlertTriangle, RefreshCw, Repeat, BarChart4,
 } from "lucide-react";
-import { parseSalesFile, ALLOWED_ASSIGNEES } from "./planImport";
+import { parseSalesFile, ALLOWED_ASSIGNEES, fiscalStartFromName } from "./planImport";
 
 /* ------------------------------------------------------------------ */
 /* 定数・ユーティリティ                                                */
@@ -760,7 +760,8 @@ function applyUnyoDiff(stocks, diff) {
 // 制作基礎数字のグラフ色
 const BASE_REVENUE_LABEL = "制作基礎数字";
 const STOCK_REVENUE_LABEL = "ストック";
-const REVENUE_EXTRA_COLORS = { [BASE_REVENUE_LABEL]: "#475569", [STOCK_REVENUE_LABEL]: "#a78bfa" };
+const ACTUAL_REVENUE_LABEL = "確定売上（月次シート）";
+const REVENUE_EXTRA_COLORS = { [BASE_REVENUE_LABEL]: "#475569", [STOCK_REVENUE_LABEL]: "#a78bfa", [ACTUAL_REVENUE_LABEL]: "#0f766e" };
 
 // 金額表示（赤枠・月間売上反映済に対応）
 function amountInfo(p) {
@@ -2490,17 +2491,28 @@ function YoyBadge({ yoy }) {
 }
 
 // 毎月の売上 = 確定案件（運用・管理を除く）+ 制作基礎数字 + ストック売上
-function MonthlyRevenuePage({ projects, monthlyTarget = 0, targetFor, stocks = [], baseOf = () => 0 }) {
-  const catColor = { ...PROJECT_CAT_COLORS, ...REVENUE_EXTRA_COLORS };
-  const revenueCats = [...CATEGORIES, BASE_REVENUE_LABEL, STOCK_REVENUE_LABEL];
+// 月次シートの売上（actualOf）がある月はその金額を確定売上として使う。prevOf は前年同月の売上（18期など）。
+function MonthlyRevenuePage({ projects, monthlyTarget = 0, targetFor, stocks = [], actualOf = () => null, prevOf = () => null }) {
+  const catColor = { 売上: "#4f46e5" };
+  // カテゴリー別（WEB・グラフィック等）は出さず、売上1本で表示。ストックは見込みのため売上に含めない
+  const SALES = "売上";
+  const revenueCats = [SALES];
   const curFy = fiscalStart(currentMonthKey());
   const [fy, setFy] = useState(curFy);
   const isConfirmed = (p) => p.status === "won" || p.status === "delivered";
   const confirmedOf = (list) => list.filter(isConfirmed).reduce((a, p) => a + (Number(p.confirmedAmount) || 0), 0);
   const stockOf = (m) => stocks.filter((st) => stockActiveIn(st, m)).reduce((a, st) => a + (Number(st.monthlyAmount) || 0), 0);
-  const monthValue = (m, c) =>
-    c === BASE_REVENUE_LABEL ? baseOf(m) : c === STOCK_REVENUE_LABEL ? stockOf(m) : confirmedOf(projects.filter((p) => p.scheduledMonth === m && p.category === c));
+  const monthValue = (m) => {
+    const actual = actualOf(m);
+    if (actual !== null) return actual;
+    return confirmedOf(projects.filter((p) => p.scheduledMonth === m));
+  };
   const totalOf = (m) => revenueCats.reduce((a, c) => a + monthValue(m, c), 0);
+  const tFor = (m) => (typeof targetFor === "function" ? targetFor(m) : monthlyTarget) || 0;
+  const prevFor = (k) => {
+    const pk = `${Number(k.slice(0, 4)) - 1}${k.slice(4)}`;
+    return prevOf(pk) ?? (totalOf(pk) || null);
+  };
   const periods = fiscalPeriods(fy);
   const thisMonth = currentMonthKey();
   const rows = periods.map(({ key: m, isFuture }) => {
@@ -2509,10 +2521,14 @@ function MonthlyRevenuePage({ projects, monthlyTarget = 0, targetFor, stocks = [
     const byCat = revenueCats.map((cat) => ({ cat, v: monthValue(m, cat) })).filter((x) => x.v > 0);
     const prevYear = `${Number(m.slice(0, 4)) - 1}${m.slice(4)}`;
     const total = totalOf(m);
-    const prevYearTotal = totalOf(prevYear);
+    const prevYearTotal = prevOf(prevYear) ?? totalOf(prevYear);
     const yoy = !isFuture && prevYearTotal > 0 ? Math.round(((total - prevYearTotal) / prevYearTotal) * 1000) / 10 : null;
-    return { month: m, isFuture, ...c, confirmedTotal: total, byCat, yoy };
+    return { month: m, isFuture, ...c, confirmedTotal: total, byCat, yoy, prevTotal: prevYearTotal || null, target: tFor(m), isActual: actualOf(m) !== null };
   });
+  const prevFyTotal = rows.reduce((x, r) => x + (r.prevTotal || 0), 0);
+  const pastRows = rows.filter((r) => !r.isFuture);
+  const toDateTotal = pastRows.reduce((x, r) => x + r.confirmedTotal, 0);
+  const toDatePrev = pastRows.reduce((x, r) => x + (r.prevTotal || 0), 0);
   const maxRev = Math.max(1, ...rows.map((r) => r.confirmedTotal));
   const fyOptions = [addMonths(curFy, -12), curFy];
   const fyTotal = rows.reduce((a, r) => a + r.confirmedTotal, 0);
@@ -2538,52 +2554,174 @@ function MonthlyRevenuePage({ projects, monthlyTarget = 0, targetFor, stocks = [
 
       <StackedTrendCard
         key={fy}
-        title={`月別の確定金額（${fiscalLabel(fy)}）`}
-        note="月の売上＝確定案件（運用・管理を除く）＋制作基礎数字＋ストック。棒の上は合計（万円）と目標との差額（緑＝達成・赤＝未達）、点線は月ごとの目標です。"
-        target={targetFor || monthlyTarget}
+        title={`月別の売上（${fiscalLabel(fy)}）`}
+        note="月次シートを読み込んだ月はその「現在 売上」、ない月は受注・納品済みの確定案件で集計しています（ストックは見込みのため含めません）。"
+        hideChips
+        target={tFor}
+        compare={prevFor}
+        compareLabel="前年同月"
+        compareMode="bar"
+        showDiff={false}
+        legend={[
+          { label: "今期の売上", color: "#4f46e5" },
+          { label: "前年同月の売上", color: "#cbd5e1" },
+          { label: "月の目標", color: "#e11d48", swatch: "dash" },
+        ]}
         categories={revenueCats}
         colors={catColor}
         ranges={[{ key: fy, label: fiscalLabel(fy), periods }]}
         valueOf={monthValue}
-        summary={({ sumFor, periods: ps, current }) => {
-          const prev = addMonths(current.key, -1);
-          const diff = sumFor(current.key) - sumFor(prev);
-          const toDate = ps.filter((p) => !p.isFuture).reduce((a, p) => a + sumFor(p.key), 0);
+        renderDetail={(p) => {
+          const r = rows.find((x) => x.month === p.key);
+          if (!r) return null;
+          const prevDiff = r.prevTotal ? r.confirmedTotal - r.prevTotal : null;
+          const tgtDiff = r.target > 0 ? r.confirmedTotal - r.target : null;
+          const sign = (v) => (v >= 0 ? "+" : "−");
+          const Box = ({ title, diff, base, baseLabel, pctText }) => (
+            <div className="flex-1 rounded-2xl border border-slate-200 px-4 py-3">
+              <div className="text-[11px] text-slate-500">{title}</div>
+              {diff === null ? (
+                <div className="mt-1 text-lg font-semibold text-slate-300">—</div>
+              ) : (
+                <div className={`mt-0.5 tabular-nums ${diff >= 0 ? "text-emerald-600" : "text-rose-600"}`} style={{ ...NUM_FONT_STYLE, fontWeight: 600, fontSize: 24, lineHeight: 1.15 }}>
+                  {sign(diff)}
+                  {fmtMan(Math.abs(diff))}
+                  <span className="ml-0.5 text-xs font-semibold">万円</span>
+                  {pctText && <span className="ml-2 text-xs font-medium">{pctText}</span>}
+                </div>
+              )}
+              <div className="mt-1 text-[11px] text-slate-500">
+                {baseLabel} {base ? formatManYen(base) : "—"}
+              </div>
+            </div>
+          );
+          return (
+            <div className="rounded-2xl bg-slate-50 p-3">
+              <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2 px-1">
+                <div className="text-sm font-semibold text-slate-800">
+                  {p.fullLabel}
+                  {r.isFuture && <span className="ml-2 rounded-full bg-white px-1.5 py-0.5 text-[10px] font-medium text-slate-500">予定</span>}
+                  {r.isActual && <span className="ml-2 rounded-full bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-700">実績</span>}
+                </div>
+                <div className="text-xs text-slate-500">
+                  売上 <b className="tabular-nums text-slate-900" style={NUM_FONT_STYLE}>{formatManYen(r.confirmedTotal)}</b>
+                </div>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Box
+                  title="昨年（前年同月）との差額"
+                  diff={prevDiff}
+                  base={r.prevTotal}
+                  baseLabel="前年同月の売上"
+                  pctText={r.prevTotal ? `${prevDiff >= 0 ? "+" : ""}${Math.round((prevDiff / r.prevTotal) * 1000) / 10}%` : ""}
+                />
+                <Box
+                  title="目標との差額"
+                  diff={tgtDiff}
+                  base={r.target}
+                  baseLabel="目標"
+                  pctText={r.target > 0 ? `達成率 ${Math.round((r.confirmedTotal / r.target) * 100)}%` : ""}
+                />
+              </div>
+            </div>
+          );
+        }}
+        summary={({ current }) => {
+          const cur = rows.find((r) => r.month === current.key) || rows[0];
+          const yoyTone = (v) => (v === null ? "text-slate-900" : v >= 0 ? "text-emerald-600" : "text-rose-600");
+          const pct = (a, b2) => (b2 > 0 ? Math.round(((a - b2) / b2) * 1000) / 10 : null);
+          const fyYoy = pct(toDateTotal, toDatePrev);
           return [
-            { label: current.isNow ? "今月" : current.fullLabel, value: fmtMan(sumFor(current.key)) },
-            { label: "先月比", value: `${diff > 0 ? "+" : ""}${fmtMan(diff)}`, tone: diff > 0 ? "text-emerald-600" : diff < 0 ? "text-rose-600" : "text-slate-700" },
-            { label: fy === curFy ? "今期の累計" : "前期の合計", value: fmtMan(toDate) },
+            { label: current.isNow ? "今月の売上" : `${current.fullLabel}の売上`, value: fmtMan(cur.confirmedTotal), sub: cur.prevTotal ? `前年同月 ${formatManYen(cur.prevTotal)}` : "前年同月 —", accent: true },
+            { label: "今月の目標達成率", value: cur.target > 0 ? Math.round((cur.confirmedTotal / cur.target) * 100) : "—", unit: cur.target > 0 ? "%" : "", sub: cur.target > 0 ? `目標 ${formatManYen(cur.target)}・あと ${formatManYen(Math.max(0, cur.target - cur.confirmedTotal))}` : "目標未設定", tone: cur.target > 0 && cur.confirmedTotal >= cur.target ? "text-emerald-600" : "text-indigo-700" },
+            { label: fy === curFy ? "今期の累計" : "前期の合計", value: fmtMan(toDateTotal), sub: `前年同期 ${formatManYen(toDatePrev)}` },
+            { label: "前年同期比", value: fyYoy === null ? "—" : `${fyYoy > 0 ? "+" : ""}${fyYoy}`, unit: fyYoy === null ? "" : "%", sub: `差額 ${toDateTotal - toDatePrev >= 0 ? "+" : "−"}${formatManYen(Math.abs(toDateTotal - toDatePrev))}`, tone: yoyTone(fyYoy) },
           ];
         }}
       />
 
-      <SectionCard title={`月別サマリー（${fiscalLabel(fy)}）`} note={`期の合計 ${formatManYen(fyTotal)}・前年同月比は前年の同じ月との比較`}>
-        <div className="flex flex-col divide-y divide-slate-100">
-          {rows.map((r) => (
-            <div key={r.month} className={`flex flex-wrap items-center gap-x-4 gap-y-2 py-3 ${r.isFuture ? "opacity-60" : ""}`}>
-              <div className="flex w-32 shrink-0 items-center gap-1.5 whitespace-nowrap text-sm font-semibold text-slate-800">
-                {monthLabel(r.month).replace(/^\d{4}年/, "")}
-                <span className="text-[11px] font-normal text-slate-400">{r.month.slice(0, 4)}</span>
-                {r.month === thisMonth && <span className="rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-medium text-white">今月</span>}
-                {r.isFuture && <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">予定</span>}
-              </div>
-              <div className="flex min-w-[160px] flex-1 items-center gap-2">
-                <div className="flex h-2.5 flex-1 overflow-hidden rounded-full bg-slate-100">
-                  {r.byCat.map((x) => (
-                    <div key={x.cat} title={`${x.cat} ${formatManYen(x.v)}`} style={{ width: `${(x.v / maxRev) * 100}%`, background: catColor[x.cat] }} />
-                  ))}
-                </div>
-                <span className="w-20 text-right text-sm font-semibold tabular-nums text-emerald-700">{formatManYen(r.confirmedTotal)}</span>
-              </div>
-              <div className="text-xs text-slate-500">
-                案件 <b className="text-slate-800">{r.total}</b>・受注 <b className="text-emerald-600">{r.won}</b>・ロスト <b className="text-rose-600">{r.lost}</b>
-              </div>
-              <RateBar won={r.won} lost={r.lost} rate={r.rate} width="120px" />
-              <div className="w-20 text-right"><YoyBadge yoy={r.yoy} /></div>
-            </div>
-          ))}
+      {/* 月別の一覧（今期・前年・目標を並べて比較） */}
+      <div className="overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-baseline justify-between gap-2 px-5 pb-3 pt-5">
+          <div className="text-sm font-semibold text-slate-800">月別サマリー（{fiscalLabel(fy)}）</div>
+          <div className="text-xs text-slate-400">金額は万円・前年比は前年同月との比較</div>
         </div>
-      </SectionCard>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[820px] text-sm">
+            <thead>
+              <tr className="border-y border-slate-100 bg-slate-50/70 text-left text-[11px] font-medium text-slate-500">
+                <th className="px-5 py-2.5 font-medium">月</th>
+                <th className="px-3 py-2.5 text-right font-medium">売上</th>
+                <th className="px-3 py-2.5 text-right font-medium">前年同月</th>
+                <th className="px-3 py-2.5 text-right font-medium">前年比</th>
+                <th className="px-3 py-2.5 text-right font-medium">目標</th>
+                <th className="px-3 py-2.5 font-medium">目標達成率</th>
+                <th className="px-3 py-2.5 text-right font-medium">目標との差</th>
+                <th className="px-5 py-2.5 text-right font-medium">案件・受注・ロスト</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const isNow = r.month === thisMonth;
+                const rate = r.target > 0 ? Math.round((r.confirmedTotal / r.target) * 100) : null;
+                const diff = r.target > 0 ? r.confirmedTotal - r.target : null;
+                return (
+                  <tr key={r.month} className={`border-b border-slate-100 last:border-b-0 ${isNow ? "bg-indigo-50/50" : ""} ${r.isFuture ? "text-slate-400" : ""}`}>
+                    <td className="whitespace-nowrap px-5 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className={`font-semibold ${r.isFuture ? "text-slate-400" : "text-slate-800"}`}>{Number(r.month.slice(5))}月</span>
+                        <span className="text-[11px] text-slate-400">{r.month.slice(0, 4)}</span>
+                        {isNow && <span className="rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-medium text-white">今月</span>}
+                        {r.isActual && <span className="rounded-full bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-700">実績</span>}
+                        {r.isFuture && <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">予定</span>}
+                      </div>
+                    </td>
+                    <td className={`px-3 py-3 text-right tabular-nums ${r.isFuture ? "" : "font-semibold text-slate-900"}`} style={NUM_FONT_STYLE}>{fmtMan(r.confirmedTotal)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums text-slate-500" style={NUM_FONT_STYLE}>{r.prevTotal ? fmtMan(r.prevTotal) : "—"}</td>
+                    <td className="px-3 py-3 text-right"><YoyBadge yoy={r.yoy} /></td>
+                    <td className="px-3 py-3 text-right tabular-nums text-slate-500" style={NUM_FONT_STYLE}>{r.target ? fmtMan(r.target) : "—"}</td>
+                    <td className="px-3 py-3">
+                      {rate === null || r.isFuture ? (
+                        <span className="text-xs text-slate-300">—</span>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <div className="h-1.5 w-20 overflow-hidden rounded-full bg-slate-100">
+                            <div className="h-full rounded-full" style={{ width: `${Math.min(100, rate)}%`, background: rate >= 100 ? "#059669" : "#6366f1" }} />
+                          </div>
+                          <span className={`w-10 text-xs font-semibold tabular-nums ${rate >= 100 ? "text-emerald-600" : "text-slate-700"}`}>{rate}%</span>
+                        </div>
+                      )}
+                    </td>
+                    <td className={`px-3 py-3 text-right text-xs font-semibold tabular-nums ${diff === null || r.isFuture ? "text-slate-300" : diff >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                      {diff === null || r.isFuture ? "—" : `${diff >= 0 ? "+" : "−"}${fmtMan(Math.abs(diff))}`}
+                    </td>
+                    <td className="whitespace-nowrap px-5 py-3 text-right text-xs text-slate-500">
+                      <b className="text-slate-700">{r.total}</b>
+                      <span className="mx-1 text-slate-300">/</span>
+                      <b className="text-emerald-600">{r.won}</b>
+                      <span className="mx-1 text-slate-300">/</span>
+                      <b className="text-rose-600">{r.lost}</b>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="border-t-2 border-slate-200 bg-slate-50/70 text-sm">
+                <td className="px-5 py-3 font-semibold text-slate-700">期の合計</td>
+                <td className="px-3 py-3 text-right font-semibold tabular-nums text-slate-900" style={NUM_FONT_STYLE}>{fmtMan(fyTotal)}</td>
+                <td className="px-3 py-3 text-right tabular-nums text-slate-500" style={NUM_FONT_STYLE}>{fmtMan(prevFyTotal)}</td>
+                <td className="px-3 py-3 text-right">
+                  <YoyBadge yoy={toDatePrev > 0 ? Math.round(((toDateTotal - toDatePrev) / toDatePrev) * 1000) / 10 : null} />
+                  <div className="text-[10px] text-slate-400">今月までの比較</div>
+                </td>
+                <td className="px-3 py-3 text-right tabular-nums text-slate-500" style={NUM_FONT_STYLE}>{fmtMan(rows.reduce((x, r) => x + (r.target || 0), 0))}</td>
+                <td className="px-3 py-3" colSpan={3}></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3269,18 +3407,23 @@ function CompanyListPage({ projects, onOpenDetail, visits, onAddVisit, stocks = 
 /* ダッシュボード：月ごとの状況（今月フォーカス）                      */
 /* ------------------------------------------------------------------ */
 
-function DashboardHero({ month, projects, stocks, target, onEditTarget, onChangeMonth, monthChoices, baseOf = () => 0, refs = [] }) {
+function DashboardHero({ month, projects, stocks, target, onEditTarget, onChangeMonth, monthChoices, baseOf = () => 0, refs = [], actualOf = () => null }) {
   const list = projects.filter((p) => p.scheduledMonth === month);
   const c = computeCounts(list);
   // 確定金額 = 受注・納品済みの合計 + 制作基礎数字 + ストック売上
   const stockOfMonth = (m) => stocks.filter((st) => stockActiveIn(st, m)).reduce((a, st) => a + (Number(st.monthlyAmount) || 0), 0);
-  const confirmed = c.confirmedTotal + baseOf(month) + stockOfMonth(month);
+  // 月次シートの売上がある月はその金額を確定金額にする
+  // ストック売上は確定に入れず、見込みとして扱う
+  const computedConfirmed = (m, total) => (actualOf(m) !== null ? actualOf(m) : total + baseOf(m));
+  const confirmed = computedConfirmed(month, c.confirmedTotal);
   const open = list.filter((p) => p.status === "active");
   const sumOf = (arr) => arr.reduce((a, p) => a + (Number(p.estimatedAmount) || 0), 0);
   const hot = sumOf(open.filter((p) => p.confidence === 3));
   const warm = sumOf(open.filter((p) => p.confidence === 2));
   const cool = sumOf(open.filter((p) => p.confidence === 1)); // 参考見積りは見込み金額に含めない
   const stock = stockOfMonth(month);
+  // 月次シートの売上がある月は運用・管理分も含まれているため、ストックを見込みに足さない
+  const stockEst = actualOf(month) !== null ? 0 : stock;
   const postponed = projects.reduce((acc, p) => acc + p.history.filter((h) => h.type === "postponed" && h.fromMonth === month).length, 0);
   const isNow = month === currentMonthKey();
   const pct = target > 0 ? Math.round((confirmed / target) * 100) : 0;
@@ -3290,13 +3433,14 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
   // リング：目標額（超えていれば合計額）を一周として、確定→HOT→WARM→COOLを積み上げる
   const R = 58;
   const C = 2 * Math.PI * R;
-  const base = Math.max(target, confirmed + hot + warm + cool, 1);
+  const base = Math.max(target, confirmed + hot + warm + cool + stockEst, 1);
   let off = 0;
   const segs = [
     [confirmed, "#059669", 1],
     [hot, "#e11d48", 0.55],
     [warm, "#d97706", 0.55],
     [cool, "#0284c7", 0.55],
+    [stockEst, "#7c3aed", 0.55],
   ]
     .filter((x) => x[0] > 0)
     .map(([v, color, op], i) => {
@@ -3320,9 +3464,9 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
 
   // 直近6か月の確定金額（ミニ推移）
   const trendMonths = Array.from({ length: 6 }, (_, i) => addMonths(month, i - 5));
-  const trend = trendMonths.map((m) => ({ m, v: computeCounts(projects.filter((p) => p.scheduledMonth === m)).confirmedTotal + baseOf(m) + stockOfMonth(m) }));
+  const trend = trendMonths.map((m) => ({ m, v: computedConfirmed(m, computeCounts(projects.filter((p) => p.scheduledMonth === m)).confirmedTotal) }));
   const trendMax = Math.max(target, ...trend.map((t) => t.v), 1);
-  const forecast = confirmed + hot + warm + cool;
+  const forecast = confirmed + hot + warm + cool + stockEst;
   const barBase = Math.max(target, forecast, 1);
   const barPct = (v) => `${(v / barBase) * 100}%`;
   const numStyle = (size, weight = 500) => ({ fontFamily: "var(--font-num)", fontWeight: weight, fontSize: size, lineHeight: 1.1 });
@@ -3422,7 +3566,7 @@ function DashboardHero({ month, projects, stocks, target, onEditTarget, onChange
           <div>
             <div className="relative h-3 overflow-visible rounded-full" style={{ background: "var(--c-track)" }}>
               <div className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full" style={{ width: barPct(forecast) }}>
-                {[[confirmed, "#059669", 1], [hot, "#e11d48", 0.6], [warm, "#d97706", 0.6], [cool, "#0284c7", 0.6]]
+                {[[confirmed, "#059669", 1], [hot, "#e11d48", 0.6], [warm, "#d97706", 0.6], [cool, "#0284c7", 0.6], [stockEst, "#7c3aed", 0.6]]
                   .filter((x) => x[0] > 0)
                   .map(([v, col, op], i) => (
                     <div key={i} style={{ flexGrow: v, flexBasis: 0, background: col, opacity: op }} />
@@ -3665,7 +3809,7 @@ function useIsDesktop() {
 }
 
 
-function MonthlyPage({ projects, stocks = [], onOpenDetail, monthlyTarget = 0, targetFor, assignees = [], scope = "all", onScopeChange, baseOf = () => 0, refs = [] }) {
+function MonthlyPage({ projects, stocks = [], onOpenDetail, monthlyTarget = 0, targetFor, assignees = [], scope = "all", onScopeChange, baseOf = () => 0, refs = [], actualOf = () => null }) {
   const per = Math.round(monthlyTarget / Math.max(1, assignees.length));
   const tFor = targetFor || (() => monthlyTarget);
   const perFor = (m) => Math.round(tFor(m) / Math.max(1, assignees.length));
@@ -3695,7 +3839,7 @@ function MonthlyPage({ projects, stocks = [], onOpenDetail, monthlyTarget = 0, t
         </span>
       </div>
       {isAll ? (
-        <MonthlyTable key="all" projects={projects} stocks={stocks} onOpenDetail={onOpenDetail} targetFor={tFor} baseOf={baseOf} refs={refs} />
+        <MonthlyTable key="all" projects={projects} stocks={stocks} onOpenDetail={onOpenDetail} targetFor={tFor} baseOf={baseOf} refs={refs} actualOf={actualOf} />
       ) : (
         <MonthlyTable
           key={scope}
@@ -3710,7 +3854,7 @@ function MonthlyPage({ projects, stocks = [], onOpenDetail, monthlyTarget = 0, t
   );
 }
 
-function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetFor, baseOf = () => 0, refs = [] }) {
+function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetFor, baseOf = () => 0, refs = [], actualOf = () => null }) {
   const tFor = targetFor || (() => target);
   const [openMonth, setOpenMonth] = useState(null);
   const isDesktop = useIsDesktop();
@@ -3728,8 +3872,11 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
     const stockTotal = stockList.reduce((a, st) => a + (st.monthlyAmount || 0), 0);
     const baseAmt = baseOf(m);
     const refList = refs.filter((p) => p.scheduledMonth === m && p.status === "active");
-    const confirmedAll = c.confirmedTotal + baseAmt + stockTotal; // ストック売上も確定金額に含める
-    const forecast = confirmedAll + sum(open); // 参考見積りは見込み金額に含めない
+    const actual = actualOf(m);
+    // 月次シートの売上があればそれを確定金額に、なければ受注・納品済み＋ストック
+    const confirmedAll = actual !== null ? actual : c.confirmedTotal + baseAmt; // ストックは見込み
+    const stockEst = actual !== null ? 0 : stockTotal;
+    const forecast = confirmedAll + sum(open) + stockEst; // 参考見積りは見込み金額に含めない
     return {
       month: m,
       list,
@@ -3741,11 +3888,13 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
       lost: c.lost,
       rate: c.rate,
       confirmed: confirmedAll,
+      actual,
       projConfirmed: c.confirmedTotal,
       hot: sum(open.filter((p) => p.confidence === 3)),
       warm: sum(open.filter((p) => p.confidence === 2)),
       cool: sum(open.filter((p) => p.confidence === 1)),
       stock: stockTotal,
+      stockEst,
       grand: forecast,
       target: tFor(m),
       remain: tFor(m) - confirmedAll,
@@ -3758,8 +3907,10 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
     { key: "warm", label: "WARM", dot: "#d97706", cls: "bg-amber-50 text-amber-600" },
     { key: "cool", label: "COOL", dot: "#0284c7", cls: "bg-sky-50 text-sky-600" },
     { key: "stock", label: "ストック", dot: "#7c3aed", cls: "bg-violet-50 text-violet-600" },
+    { key: "stockEst", label: "ストック", dot: "#7c3aed", cls: "bg-violet-50 text-violet-600" },
     { key: "projConfirmed", label: "受注・納品済み", dot: "#059669", cls: "bg-emerald-50/60 text-emerald-700" },
     { key: "baseAmt", label: "制作基礎数字", dot: REVENUE_EXTRA_COLORS[BASE_REVENUE_LABEL], cls: "bg-slate-50 text-slate-700" },
+    { key: "actual", label: "月次シートの売上", dot: REVENUE_EXTRA_COLORS[ACTUAL_REVENUE_LABEL], cls: "bg-teal-50 text-teal-700" },
   ];
   const NUM_FONT = { fontFamily: "var(--font-num)" };
   const manN = (n) => Math.round(n / 10000).toLocaleString("ja-JP");
@@ -3927,18 +4078,18 @@ function MonthlyTable({ projects, stocks = [], onOpenDetail, target = 0, targetF
               </span>
             </div>
             <div className="flex flex-col gap-1">
-              {["projConfirmed", "baseAmt", "stock"].map((k) => LIST.find((it) => it.key === k)).map(renderLine)}
+              {(r.actual !== null ? ["actual"] : ["projConfirmed"]).map((k) => LIST.find((it) => it.key === k)).map(renderLine)}
             </div>
           </div>
           <div className="rounded-2xl border border-slate-200 p-1.5">
             <div className="flex items-center justify-between px-1.5 pb-1.5 pt-0.5">
-              <span className="text-xs font-medium text-slate-500">見込み金額（HOT＋WARM＋COOL）</span>
-              <span className="tabular-nums text-slate-800" style={{ ...NUM_FONT, fontWeight: 600, fontSize: 16 }}>
-                {manN(r.hot + r.warm + r.cool)}<span className="ml-0.5 text-[11px]">万円</span>
+              <span className="text-xs font-medium text-slate-500">見込み金額</span>
+              <span className="whitespace-nowrap tabular-nums text-slate-800" style={{ ...NUM_FONT, fontWeight: 600, fontSize: 16 }}>
+                {manN(r.hot + r.warm + r.cool + r.stockEst)}<span className="ml-0.5 text-[11px]">万円</span>
               </span>
             </div>
             <div className="flex flex-col gap-1">
-              {LIST.filter((it) => ["hot", "warm", "cool"].includes(it.key)).map(renderLine)}
+              {["hot", "warm", "cool", "stockEst"].map((k) => LIST.find((it) => it.key === k)).map(renderLine)}
             </div>
           </div>
         </div>
@@ -4076,6 +4227,14 @@ function StackedTrendCard({
   nowLabel = "今月",
   summary, // ({ sumFor, periods, current }) => [{ label, value, tone }]
   target = 0, // 目標金額（円）または (期間key) => 円。指定すると目標ラインと、目標に対する差額（達成は緑・未達は赤）を表示
+  compare = null, // (期間key) => 円。前年同月などの比較用
+  compareLabel = "前年",
+  compareMode = "line", // "line"：折れ線 / "bar"：今期の棒の左に前年の棒を並べる
+  showDiff = true, // 棒の上に目標との差額を出すか
+  legend = null, // グラフ下の凡例 [{ label, swatch: "bar"|"dash"|"line", color }]
+  onPeriodClick = null,
+  renderDetail = null, // (period) => ReactNode。指定するとグラフの下に月ごとのボタンを出し、選んだ月の詳細を表示
+  hideChips = false, // 項目の切り替えチップを出さない
 }) {
   const [hidden, setHidden] = useState([]);
   const narrow = useWindowWidth() < 640;
@@ -4085,7 +4244,12 @@ function StackedTrendCard({
   });
   const range = ranges.find((r) => r.key === rangeKey) || ranges[0];
   const periods = range.periods;
-  const visibleCats = categories.filter((c) => !hidden.includes(c));
+  // 表示期間に金額が1つもない項目はチップ・棒から外す
+  const activeCats = (() => {
+    const list = categories.filter((c) => range.periods.some((p) => (valueOf(p.key, c) || 0) > 0));
+    return list.length ? list : categories;
+  })();
+  const visibleCats = activeCats.filter((c) => !hidden.includes(c));
   const sumFor = (pk, cats = visibleCats) => cats.reduce((a, c) => a + (valueOf(pk, c) || 0), 0);
 
   const data = periods.map((p) => {
@@ -4093,16 +4257,20 @@ function StackedTrendCard({
     categories.forEach((c) => (row[c] = hidden.includes(c) ? 0 : (valueOf(p.key, c) || 0) / 10000));
     row.total = visibleCats.reduce((a, c) => a + row[c], 0);
     row.target = (typeof target === "function" ? target(p.key) : target) / 10000 || 0;
+    const cv = compare ? compare(p.key) : null;
+    row.compare = cv ? cv / 10000 : null;
     return row;
   });
   const current = periods.find((p) => p.isNow) || periods[periods.length - 1];
+  const [selectedKey, setSelectedKey] = useState(null);
+  const selected = periods.find((p) => p.key === selectedKey) || current;
   const lastCat = [...visibleCats].reverse().find((c) => data.some((r) => r[c] > 0)) || visibleCats[visibleCats.length - 1];
   const fmt = (v) => (Math.round(v * 10) / 10).toLocaleString("ja-JP", { maximumFractionDigits: 1 });
   const toggle = (c) => setHidden((h) => (h.includes(c) ? h.filter((x) => x !== c) : [...h, c]));
   const crowded = narrow && periods.length > 6;
   const tiles = summary ? summary({ sumFor, periods, current }) : [];
   const hasTarget = data.some((r) => r.target > 0);
-  const diffOf = (row) => (row.target > 0 && !row.isFuture ? row.total - row.target : null);
+  const diffOf = (row) => (showDiff && row.target > 0 && !row.isFuture ? row.total - row.target : null);
   const fmtDiff = (d) => `${d >= 0 ? "+" : "−"}${fmt(Math.abs(d))}万円`;
   const DIFF_UP = "#059669";
   const DIFF_DOWN = "#e11d48";
@@ -4186,6 +4354,12 @@ function StackedTrendCard({
           <span>合計</span>
           <span className="tabular-nums">{fmt(row.total)}万円</span>
         </div>
+        {row.compare !== null && row.compare !== undefined && (
+          <div className="mt-1 flex items-center justify-between text-[11px]">
+            <span className="flex items-center gap-1.5 text-slate-500"><span className="inline-block h-0.5 w-3 bg-slate-400" />{compareLabel}</span>
+            <span className="tabular-nums font-medium text-slate-600">{fmt(row.compare)}万円</span>
+          </div>
+        )}
         {row.target > 0 && (
           <div className="mt-1 flex items-center justify-between text-[11px]">
             <span className="text-slate-500">目標 {fmt(row.target)}万円に対して</span>
@@ -4221,23 +4395,25 @@ function StackedTrendCard({
       </div>
 
       {tiles.length > 0 && (
-        <div className="mt-4 grid grid-cols-3 gap-2">
+        <div className="mt-4 grid gap-2" style={{ gridTemplateColumns: `repeat(${narrow && tiles.length > 3 ? 2 : tiles.length}, minmax(0, 1fr))` }}>
           {tiles.map((t) => (
-            <div key={t.label} className="rounded-2xl bg-slate-50 px-3 py-2.5">
-              <div className="text-[11px] text-slate-500">{t.label}</div>
-              <div className={`whitespace-nowrap tabular-nums ${t.tone || "text-slate-900"}`} style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: narrow ? 17 : 22, lineHeight: 1.2 }}>
+            <div key={t.label} className={`rounded-2xl px-3.5 py-3 ${t.accent ? "bg-slate-900 text-white" : "bg-slate-50"}`}>
+              <div className={`text-[11px] ${t.accent ? "text-white/70" : "text-slate-500"}`}>{t.label}</div>
+              <div className={`mt-0.5 whitespace-nowrap tabular-nums ${t.accent ? "text-white" : t.tone || "text-slate-900"}`} style={{ fontFamily: "var(--font-num)", fontWeight: 600, fontSize: narrow ? 18 : 24, lineHeight: 1.15 }}>
                 {t.value}
-                <span className="ml-0.5 text-xs">万円</span>
+                <span className="ml-0.5 text-xs font-semibold">{t.unit ?? "万円"}</span>
               </div>
+              {t.sub && <div className={`mt-1 truncate text-[11px] ${t.accent ? "text-white/70" : "text-slate-500"}`}>{t.sub}</div>}
             </div>
           ))}
         </div>
       )}
 
-      <div className="mt-4 flex flex-wrap gap-1.5">
-        {categories.map((c) => {
+      <div className={`mt-4 flex-wrap gap-1.5 ${hideChips ? "hidden" : "flex"}`}>
+        {activeCats.map((c) => {
           const off = hidden.includes(c);
-          const amt = valueOf(current.key, c) || 0;
+          // チップの金額は表示期間の合計
+          const amt = periods.reduce((a2, p) => a2 + (valueOf(p.key, c) || 0), 0);
           return (
             <button
               key={c}
@@ -4255,19 +4431,33 @@ function StackedTrendCard({
 
       <div className="mt-3 h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart key={`${rangeKey}-${hidden.join(",")}`} data={data} margin={{ top: hasTarget ? 58 : 40, right: 4, left: 0, bottom: 0 }} barCategoryGap="22%">
+          <ComposedChart
+            key={`${rangeKey}-${hidden.join(",")}`}
+            data={data}
+            onClick={(st) => {
+              if (renderDetail && st && st.activeTooltipIndex !== undefined && periods[st.activeTooltipIndex]) setSelectedKey(periods[st.activeTooltipIndex].key);
+            }} margin={{ top: hasTarget ? 58 : 40, right: 4, left: 0, bottom: 0 }} barCategoryGap={compare && compareMode === "bar" ? "18%" : "22%"} barGap={3}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" strokeOpacity={0.6} />
             <XAxis
               dataKey="label"
               axisLine={false}
               tickLine={false}
               interval={0}
+              height={compare && compareMode === "line" ? 40 : 30}
               tick={({ x, y, payload, index }) => {
                 const row = data[index];
+                const showCmp = compare && compareMode === "line" && row && row.compare && !(crowded && !row.isNow);
                 return (
-                  <text x={x} y={y + 14} textAnchor="middle" style={{ fontSize: 11, fontWeight: row && row.isNow ? 700 : 400, fill: row && row.isNow ? "var(--c-ink)" : "#94A3B8" }}>
-                    {payload.value}
-                  </text>
+                  <g>
+                    <text x={x} y={y + 14} textAnchor="middle" style={{ fontSize: 11, fontWeight: row && row.isNow ? 700 : 400, fill: row && row.isNow ? "var(--c-ink)" : "#94A3B8" }}>
+                      {payload.value}
+                    </text>
+                    {showCmp && (
+                      <text x={x} y={y + 29} textAnchor="middle" style={{ fontSize: narrow ? 9 : 10, fill: "#64748b", fontFamily: "var(--font-num)" }}>
+                        前年 {fmt(row.compare)}
+                      </text>
+                    )}
+                  </g>
                 );
               }}
             />
@@ -4279,6 +4469,13 @@ function StackedTrendCard({
               domain={[0, (max) => { const v = max * 1.04 || 1; const step = v > 2000 ? 500 : v > 500 ? 100 : v > 100 ? 50 : 10; return Math.ceil(v / step) * step; }]}
             />
             <Tooltip content={<TrendTooltip />} cursor={{ fill: "rgba(148,163,184,.12)", radius: 8 }} />
+            {compare && compareMode === "bar" && (
+              <Bar dataKey="compare" name={compareLabel} fill="#cbd5e1" radius={[5, 5, 0, 0]} maxBarSize={28} isAnimationActive animationDuration={600}>
+                {data.map((row) => (
+                  <Cell key={row.key} fill={row.isNow ? "#94a3b8" : "#cbd5e1"} />
+                ))}
+              </Bar>
+            )}
             {visibleCats.map((c, i) => (
               <Bar
                 key={c}
@@ -4298,11 +4495,63 @@ function StackedTrendCard({
                 {c === lastCat && <LabelList content={<TotalLabel />} />}
               </Bar>
             ))}
+            {compare && compareMode === "line" && (
+              <Line
+                type="monotone"
+                dataKey="compare"
+                name={compareLabel}
+                stroke="#94a3b8"
+                strokeWidth={2}
+                strokeDasharray="5 4"
+                dot={{ r: 3.5, fill: "#fff", stroke: "#94a3b8", strokeWidth: 2 }}
+                activeDot={{ r: 5 }}
+                connectNulls
+                isAnimationActive={false}
+              />
+            )}
             {hasTarget && <XAxis xAxisId="t" dataKey="label" hide />}
             {hasTarget && <Bar xAxisId="t" dataKey="target" isAnimationActive={false} shape={<TargetTick />} />}
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+      {renderDetail && (
+        <>
+          {/* 各月のボタン（グラフの列にそろえる） */}
+          <div className="mt-1 grid gap-1" style={{ paddingLeft: 40, paddingRight: 4, gridTemplateColumns: `repeat(${periods.length}, minmax(0, 1fr))` }}>
+            {periods.map((p) => {
+              const on = p.key === selected.key;
+              return (
+                <button
+                  key={p.key}
+                  onClick={() => setSelectedKey(p.key)}
+                  className={`rounded-lg border py-1 text-[11px] font-medium transition-colors ${
+                    on ? "border-slate-900 bg-slate-900 text-white" : p.isFuture ? "border-slate-200 bg-white text-slate-400 hover:bg-slate-50" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
+                  }`}
+                  aria-pressed={on}
+                  title={`${p.fullLabel}の差額を見る`}
+                >
+                  {narrow ? p.label.replace("月", "") : "差額"}
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-3">{renderDetail(selected)}</div>
+        </>
+      )}
+      {legend && (
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-x-5 gap-y-1 text-[11px] text-slate-500">
+          {legend.map((l) => (
+            <span key={l.label} className="flex items-center gap-1.5">
+              {l.swatch === "dash" ? (
+                <span className="inline-block w-4 border-t-2 border-dashed" style={{ borderColor: l.color }} />
+              ) : (
+                <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: l.color }} />
+              )}
+              {l.label}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -5353,7 +5602,7 @@ function SalesImportModal({ open, onClose, onImport, projects, assignees }) {
     for (const f of list) {
       try {
         const text = await readCsvFile(f);
-        const parsed = parseSalesFile(text, fyYear);
+        const parsed = parseSalesFile(text, fiscalStartFromName(f.name) || fyYear);
         out.push({ name: f.name, parsed, error: parsed ? "" : "売上計画・アタックリストのどちらの形式としても読み取れませんでした" });
       } catch (err) {
         out.push({ name: f.name, parsed: null, error: "読み込みに失敗しました" });
@@ -5365,23 +5614,27 @@ function SalesImportModal({ open, onClose, onImport, projects, assignees }) {
     setFiles([]);
     onClose();
   }
-  const { incoming, base, targets } = useMemo(() => {
+  const { incoming, base, targets, actuals, prevYear } = useMemo(() => {
     const inc = [];
     const b = {};
     const t = {};
+    const ac = {};
+    const py = {};
     files.forEach(({ parsed }) => {
       if (!parsed) return;
-      if (parsed.type === "plan") {
+      if (parsed.type === "monthly") ac[parsed.month] = parsed.amount;
+      else if (parsed.type === "plan") {
         [...parsed.confirmed, ...parsed.hot].forEach((x) => inc.push(salesItemToProject(x, "plan")));
         Object.assign(b, parsed.base);
         Object.assign(t, parsed.targets);
+        Object.assign(py, parsed.prevYear || {});
       } else parsed.items.forEach((x) => inc.push(salesItemToProject(x, "attack")));
     });
-    return { incoming: inc, base: b, targets: t };
+    return { incoming: inc, base: b, targets: t, actuals: ac, prevYear: py };
   }, [files]);
   const diff = useMemo(() => diffSalesProjects(projects, incoming), [projects, incoming]);
   const newAssignees = Array.from(new Set(incoming.map((p) => p.assignee).filter((a) => a && !assignees.includes(a))));
-  const hasPlan = Object.keys(base).length + Object.keys(targets).length > 0;
+  const hasPlan = Object.keys(targets).length + Object.keys(actuals).length + Object.keys(prevYear).length > 0;
   const applyCount = diff.added.length + diff.changed.length;
   const Line = ({ label, value, tone = "text-slate-800" }) => (
     <div className="flex flex-col gap-0.5 py-1 text-xs sm:flex-row sm:items-center sm:justify-between sm:gap-3">
@@ -5393,7 +5646,7 @@ function SalesImportModal({ open, onClose, onImport, projects, assignees }) {
   return (
     <Modal open={open} onClose={close} title="売上計画・アタックリストを読み込む" width="max-w-2xl">
       <p className="text-sm leading-relaxed text-slate-500">
-        読み込む担当は {ALLOWED_ASSIGNEES.join("・")} のみです。19期の売上計画（上期 8月〜1月・下期 2月〜7月）とアタックリストのCSVを、まとめて選べます。種類は中身から自動で判定し、前回と変わりのない案件は読み込みません。
+        各月の売上シート（例：10月）は「現在 売上」をその月の確定売上として読み込みます。読み込む担当は {ALLOWED_ASSIGNEES.join("・")} のみです。19期の売上計画（上期 8月〜1月・下期 2月〜7月）とアタックリストのCSVを、まとめて選べます。種類は中身から自動で判定し、前回と変わりのない案件は読み込みません。
       </p>
       <input
         type="file"
@@ -5407,6 +5660,16 @@ function SalesImportModal({ open, onClose, onImport, projects, assignees }) {
           {files.map((f) => {
             const p = f.parsed;
             if (!p) return <div key={f.name} className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-600">{f.name}：{f.error}</div>;
+            if (p.type === "monthly")
+              return (
+                <div key={f.name} className="rounded-xl border border-slate-200 p-3">
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <span className="truncate text-sm font-semibold text-slate-800">{f.name}</span>
+                    <span className="shrink-0 rounded-full bg-teal-50 px-2 py-0.5 text-[11px] font-medium text-teal-700">月次売上シート {monthLabel(p.month)}</span>
+                  </div>
+                  <Line label={`${monthLabel(p.month)}の確定売上（現在 売上）`} value={formatYen(p.amount)} tone="text-teal-700" />
+                </div>
+              );
             if (p.type === "plan") {
               const first = p.months[0];
               const last = p.months[p.months.length - 1];
@@ -5419,7 +5682,7 @@ function SalesImportModal({ open, onClose, onImport, projects, assignees }) {
                     <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">売上計画 {monthLabel(first)}〜{monthLabel(last).replace(/^\d{4}年/, "")}</span>
                   </div>
                   <Line label="月の目標金額" value={tVals.map((v) => formatManYen(v)).join("・") || "—"} />
-                  <Line label="制作基礎数字（確定金額に加算）" value={p.months.map((m) => `${Number(m.slice(5))}月 ${formatManYen(p.base[m] || 0)}`).join("／")} />
+                  <Line label="前年度売上（月別売上で前年と比較）" value={Object.keys(p.prevYear || {}).length ? `${Object.keys(p.prevYear).length}か月分` : "—"} />
                   <Line label="確定売上 → 受注" value={`${p.confirmed.length}件（うち月間売上反映済 ${reflected}件）`} tone="text-emerald-600" />
                   <Line label="見積提出 未決定売上 → HOT" value={`${p.hot.length}件・${formatManYen(p.hot.reduce((a, x) => a + (x.amount || 0), 0))}`} tone="text-rose-600" />
                   <Line label="運用・管理（ストック売上のため読み込まない）" value={`${p.skippedStock}件`} tone="text-slate-400" />
@@ -5480,10 +5743,10 @@ function SalesImportModal({ open, onClose, onImport, projects, assignees }) {
         <button onClick={close} className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">キャンセル</button>
         <button
           disabled={!files.length || (applyCount === 0 && !hasPlan)}
-          onClick={() => onImport({ diff, base, targets })}
+          onClick={() => onImport({ diff, targets, actuals, prevYear })}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
         >
-          {!files.length ? "反映する" : applyCount === 0 ? (hasPlan ? "目標・基礎数字だけ反映する" : "変更はありません") : `${applyCount}件を反映する`}
+          {!files.length ? "反映する" : applyCount === 0 ? (hasPlan ? "売上・目標を反映する" : "変更はありません") : `${applyCount}件を反映する`}
         </button>
       </div>
     </Modal>
@@ -5913,6 +6176,11 @@ const PAGE_META = {
   reference: ["参考見積り", "参考見積り全体・受注予定月あり・受注月未定で切り替えて確認できます（見込み金額には含めません）。"],
 };
 
+// カラーモードの切り替えを表示するか（戻すときは true に）
+const SHOW_THEME_SWITCHER = false;
+// 案件をクリックしたときに詳細パネルを開くか（戻すときは true に）
+const SHOW_PROJECT_DETAIL = false;
+
 export default function App() {
   const [initialData] = useState(() => {
     if (!USE_DEMO_SEED) return { projects: [], visits: [] };
@@ -5926,11 +6194,12 @@ export default function App() {
   const [monthlyScope, setMonthlyScope] = useState("all");
   const [monthlyNavOpen, setMonthlyNavOpen] = useState(false);
   const [undecidedNavOpen, setUndecidedNavOpen] = useState(false);
-  const [baseRevenue, setBaseRevenue] = useState({}); // 制作基礎数字 { "2026-08": 円 }
+  const [actualRevenue, setActualRevenue] = useState({}); // 月次シートの「現在 売上」 { "2026-10": 円 }
+  const [prevRevenue, setPrevRevenue] = useState({}); // 売上計画の「前年度売上」 { "2025-10": 円 }
   const [monthTargets, setMonthTargets] = useState({}); // 売上計画の月ごとの目標 { "2026-08": 円 }
   const [showSalesImport, setShowSalesImport] = useState(false);
   const [theme, setTheme] = useState(() => {
-    const t = loadTheme();
+    const t = SHOW_THEME_SWITCHER ? loadTheme() : "a"; // 切り替えを出さないときはライトで固定
     if (typeof document !== "undefined") document.documentElement.dataset.theme = t;
     return t;
   });
@@ -5976,7 +6245,7 @@ export default function App() {
   projectsRef.current = projects;
   sourcesRef.current = sheetSources;
   const detail = projects.find((p) => p.id === detailId) || null;
-  const setDetail = (p) => setDetailId(p ? p.id : null);
+  const setDetail = (p) => setDetailId(p && SHOW_PROJECT_DETAIL ? p.id : null);
   const detailVisits = detail ? visits.filter((v) => v.relatedProjectId === detail.id) : [];
 
   function pushToast(message) {
@@ -5991,7 +6260,10 @@ export default function App() {
   const datedProjects = useMemo(() => visibleProjects.filter((p) => p.scheduledMonth), [visibleProjects]);
   const undecidedProjects = useMemo(() => visibleProjects.filter((p) => !p.scheduledMonth && !p.archived), [visibleProjects]);
   const boardProjects = useMemo(() => datedProjects.filter((p) => !p.archived), [datedProjects]);
-  const baseOf = (m) => baseRevenue[m] || 0;
+  const baseOf = () => 0; // 制作基礎数字は使わない（売上に加算しない）
+  const actualOf = (m) => (actualRevenue[m] !== undefined ? actualRevenue[m] : null);
+  // 前年同月の売上：前年の月次シートがあればそれ、なければ売上計画の「前年度売上」
+  const prevOf = (m) => (actualRevenue[m] !== undefined ? actualRevenue[m] : prevRevenue[m] !== undefined ? prevRevenue[m] : null);
   const targetFor = (m) => (monthTargets[m] !== undefined ? monthTargets[m] : monthlyTarget);
   const companyNames = useMemo(
     () => Array.from(new Set(visibleProjects.map((p) => p.clientName))).sort((a, b) => a.localeCompare(b, "ja")),
@@ -6355,11 +6627,13 @@ export default function App() {
     pushToast(`「${project.clientName}」を${monthLabel(month)}に設定しました`);
   }
 
-  function importSales({ diff, base, targets }) {
+  function importSales({ diff, targets, actuals = {}, prevYear = {} }) {
     setProjects((list) => applySalesDiff(list, diff));
-    if (Object.keys(base).length) setBaseRevenue((b) => ({ ...b, ...base }));
     if (Object.keys(targets).length) setMonthTargets((t) => ({ ...t, ...targets }));
-    pushToast(`CSVを反映しました（新規${diff.added.length}件・変更${diff.changed.length}件／変更なし${diff.unchanged.length}件は読み込みませんでした）`);
+    if (Object.keys(actuals).length) setActualRevenue((a) => ({ ...a, ...actuals }));
+    if (Object.keys(prevYear).length) setPrevRevenue((a) => ({ ...a, ...prevYear }));
+    const monthsNote = Object.keys(actuals).length ? `・月次売上${Object.keys(actuals).length}か月分` : "";
+    pushToast(`CSVを反映しました（新規${diff.added.length}件・変更${diff.changed.length}件${monthsNote}／変更なし${diff.unchanged.length}件は読み込みませんでした）`);
     setShowSalesImport(false);
   }
 
@@ -6512,7 +6786,7 @@ export default function App() {
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto">
           {renderNav(() => {})}
         </nav>
-        <ThemeSwitcher theme={theme} onChange={changeTheme} />
+        {SHOW_THEME_SWITCHER && <ThemeSwitcher theme={theme} onChange={changeTheme} />}
       </aside>
 
       {/* Sidebar (モバイル用ドロワー) */}
@@ -6538,7 +6812,7 @@ export default function App() {
               {renderNav(() => setMobileNavOpen(false))}
             </nav>
             <div className="mt-auto pt-4">
-              <ThemeSwitcher theme={theme} onChange={changeTheme} />
+              {SHOW_THEME_SWITCHER && <ThemeSwitcher theme={theme} onChange={changeTheme} />}
             </div>
           </div>
         </div>
@@ -6619,6 +6893,7 @@ export default function App() {
                     stocks={stocks}
                     target={targetFor(dashMonth)}
                     baseOf={baseOf}
+                    actualOf={actualOf}
                     refs={referenceProjects}
                     onEditTarget={() => setShowTargetEdit(true)}
                     onChangeMonth={(m) => {
@@ -6749,7 +7024,7 @@ export default function App() {
 
           {view === "monthly" && (
             <div className="mx-auto max-w-6xl">
-              <MonthlyPage projects={boardProjects} stocks={stocks} onOpenDetail={setDetail} monthlyTarget={monthlyTarget} targetFor={targetFor} baseOf={baseOf} refs={referenceProjects} assignees={assigneeNames} scope={monthlyScope} onScopeChange={setMonthlyScope} />
+              <MonthlyPage projects={boardProjects} stocks={stocks} onOpenDetail={setDetail} monthlyTarget={monthlyTarget} targetFor={targetFor} baseOf={baseOf} actualOf={actualOf} refs={referenceProjects} assignees={assigneeNames} scope={monthlyScope} onScopeChange={setMonthlyScope} />
             </div>
           )}
 
@@ -6767,7 +7042,7 @@ export default function App() {
 
           {view === "monthlyRevenue" && (
             <div className="mx-auto max-w-6xl">
-              <MonthlyRevenuePage projects={datedProjects} monthlyTarget={monthlyTarget} targetFor={targetFor} stocks={stocks} baseOf={baseOf} />
+              <MonthlyRevenuePage projects={datedProjects} monthlyTarget={monthlyTarget} targetFor={targetFor} stocks={stocks} actualOf={actualOf} prevOf={prevOf} />
             </div>
           )}
 
